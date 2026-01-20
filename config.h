@@ -1,7 +1,7 @@
 ﻿#pragma once
 
 // https://github.com/1992724048/stdpp-config
-// 1.0.0
+// 1.0.1
 
 #include <unordered_map>
 #include <string>
@@ -38,6 +38,17 @@ namespace stdpp::config {
 
     enum class Event { VALUE_CHANG, VALUE_LOAD, };
 
+    enum class LockMode { Read, Write };
+
+    /**
+     * @brief 类型到 JSON 的编解码器
+     * Codec<T> 定义类型 T 与 nlohmann::json 之间的转换规则。
+     * 默认行为：
+     * - encode：直接返回 JSON 可隐式构造的值
+     * - decode：使用 json.get<T>()
+     * 用户可以通过特化 Codec<T> 来支持自定义类型。
+     * @tparam T 可序列化类型
+     */
     template<typename T>
     struct Codec {
         static auto encode(const T& v) -> nlohmann::json {
@@ -59,18 +70,41 @@ namespace stdpp::config {
     template<typename T>
     class FieldValue;
 
+    /**
+    * @brief 配置字段的非模板基类
+    * FieldEntryBase 提供所有字段共享的基础能力：
+    * - 字段元信息（名称、类型）
+    * - JSON 编解码的虚接口
+    * - 多线程读写保护
+    * - 变更标记与事件分发
+    * 该类型：
+    * - 不直接存储字段值
+    * - 仅由 Config / Field / FieldValue 内部使用
+    * - 通过多态支持不同类型字段的统一管理
+    */
     struct FieldEntryBase {
         FieldEntryBase(STR name, STR type_name, const std::type_index& type) : name{std::move(name)}, type_name{std::move(type_name)}, type{type} {}
         virtual ~FieldEntryBase() = default;
 
+        /**
+         * @brief 将字段当前值编码为 JSON
+         * @return JSON 对象
+         * @note 默认实现返回空 object
+         */
         virtual auto encode() -> nlohmann::json {
             return nlohmann::json::object();
         }
 
+        /**
+         * @brief 从 JSON 解码并更新字段值
+         * @param json JSON 数据
+         * @note 默认实现不做任何处理
+         */
         virtual auto decode(const nlohmann::json& json) -> void {}
 
     protected:
         friend class Config;
+        friend class FieldValueMutex;
 
         STR name;
         STR type_name;
@@ -87,6 +121,16 @@ namespace stdpp::config {
         event::FastEvent<void, const PTR<FieldEntryBase>&, const Event> events;
     };
 
+    /**
+     * @brief 强类型字段实体
+     * FieldEntry<T> 是：
+     * - 某一具体类型 T 的字段存储单元
+     * - FieldEntryBase 的模板派生
+     * 职责：
+     * - 持有字段真实值
+     * - 提供线程安全的 JSON 编解码
+     * @tparam T 字段值类型，必须满足 JsonSerializable
+     */
     template<JsonSerializable T>
     struct FieldEntry : FieldEntryBase {
         template<typename... Args>
@@ -123,17 +167,27 @@ namespace stdpp::config {
     template<typename T>
     using FE = FieldEntry<T>;
 
+    /**
+    * @brief 全局配置管理器
+    * 负责：
+    * - 配置字段的创建与查找
+    * - JSON 文件的加载 / 保存
+    * - 字段值与配置文件的同步
+    * - 配置变更事件分发
+    * 该类为纯静态工具类，不可实例化。
+    */
     class Config {
     public:
         /**
-         * @brief 
-         * @tparam T 
-         * @tparam Args 
-         * @param name 
-         * @param type 
-         * @param args 
-         * @return 
-         * @exception std::runtime_error 
+         * @brief 查找已存在的字段，若不存在则创建
+         *
+         * @tparam T 字段值类型
+         * @tparam Args 构造字段初始值所需的参数
+         * @param name 字段完整路径名（使用 "::" 分隔层级）
+         * @param type 字段类型名（通常为 typeid(T).name()）
+         * @param args 用于构造字段初始值的参数
+         * @return 对应字段的共享指针
+         * @exception std::runtime_error 若已存在字段但类型与 T 不一致
          */
         template<typename T, typename... Args>
         static auto find_or_create(const STR& name, const STR& type, Args&&... args) -> FEP<T> {
@@ -155,6 +209,13 @@ namespace stdpp::config {
             return entry;
         }
 
+        /**
+         * @brief 从指定路径加载配置文件
+         * - 若文件不存在或解析失败，返回 false
+         * - 成功后会尝试将已注册字段与配置文件内容同步
+         * @param config_path 配置文件路径
+         * @return 是否加载成功
+         */
         static auto load(const std::filesystem::path& config_path) -> bool {
             path = config_path;
 
@@ -170,10 +231,20 @@ namespace stdpp::config {
             return true;
         }
 
+        /**
+         * @brief 重新加载上一次成功 load 的配置文件
+         * @return 是否加载成功
+         */
         static auto refresh() -> bool {
             return load(path);
         }
 
+        /**
+         * @brief 将所有被修改的字段写回配置文件
+         * - 仅当存在脏数据时才会写入
+         * - 写入成功后清除脏标记
+         * @return 是否保存成功
+         */
         static auto save() -> bool {
             if (!is_dirty.exchange(false)) {
                 return true;
@@ -202,10 +273,20 @@ namespace stdpp::config {
             return save_config_to_file();
         }
 
+        /**
+        * @brief 标记当前配置为脏状态
+        * 通常在字段值被修改时由内部自动调用。
+        */
         static auto mark_dirty() -> void {
             is_dirty = true;
         }
 
+        /**
+         * @brief 为指定字段添加事件回调
+         * @param name 字段名
+         * @param func 回调函数
+         * @return 成功时返回事件句柄，否则返回 std::nullopt
+         */
         static auto add_event(const STR& name, const event::FastEvent<void, const FEBP&, const Event>::Func func) -> OPT<event::FastEvent<void, const FEBP&, const Event>::Handle> {
             const auto entry = find_entry(name);
             if (!entry) {
@@ -214,6 +295,11 @@ namespace stdpp::config {
             return add_event(entry.value(), func);
         }
 
+        /**
+        * @brief 移除指定字段的事件回调
+        * @param name 字段名
+        * @param handle 事件句柄
+        */
         static auto remove_event(const STR& name, const event::FastEvent<void, const FEBP&, const Event>::Handle handle) -> void {
             const auto entry = find_entry(name);
             if (!entry) {
@@ -222,14 +308,30 @@ namespace stdpp::config {
             return remove_event(entry.value(), handle);
         }
 
+        /**
+         * @brief 为指定字段实体添加事件回调
+         * @param entry 字段实体
+         * @param func 回调函数
+         * @return 事件句柄（可能为空）
+         */
         static auto add_event(const FEBP& entry, const event::FastEvent<void, const FEBP&, const Event>::Func func) -> OPT<event::FastEvent<void, const FEBP&, const Event>::Handle> {
             return entry->events += func;
         }
 
+        /**
+        * @brief 从字段实体移除事件回调
+        * @param entry 字段实体
+        * @param handle 事件句柄
+        */
         static auto remove_event(const FEBP& entry, const event::FastEvent<void, const FEBP&, const Event>::Handle handle) -> void {
             return entry->events -= handle;
         }
 
+        /**
+         * @brief 查找指定名称的字段实体
+         * @param name 字段名
+         * @return 若存在返回字段指针，否则返回 std::nullopt
+         */
         static auto find_entry(const STR& name) -> OPT<FEBP> {
             std::shared_lock _(field_mutex);
             if (const auto it = field_entrys.find(name); it != field_entrys.end()) {
@@ -329,17 +431,90 @@ namespace stdpp::config {
         }
     };
 
+    /**
+    * @brief 字段值互斥访问的 RAII 封装
+    * 用于安全访问 FieldValue 内部的 value，
+    * 在作用域结束时自动释放锁。
+    */
+    class FieldValueMutex {
+    public:
+        FieldValueMutex(const FieldValueMutex&) = delete;
+        auto operator=(const FieldValueMutex&) -> FieldValueMutex& = delete;
+
+        FieldValueMutex(FieldValueMutex&&) = default;
+        auto operator=(FieldValueMutex&&) -> FieldValueMutex& = default;
+
+        /**
+         * @brief 构造并获取字段值锁
+         * @param entry 字段实体
+         * @param mode 锁模式（读 / 写）
+         */
+        FieldValueMutex(FEBP entry, const LockMode mode) : entry_(std::move(entry)), mode_(mode) {
+            if (mode_ == LockMode::Write) {
+                write_lock_.emplace(entry_->value_mutex);
+            } else {
+                read_lock_.emplace(entry_->value_mutex);
+            }
+        }
+
+    private:
+        FEBP entry_;
+        LockMode mode_;
+
+        std::optional<std::unique_lock<std::shared_mutex>> write_lock_;
+        std::optional<std::shared_lock<std::shared_mutex>> read_lock_;
+    };
+
+    /**
+    * @brief 字段值的轻量级访问与操作封装
+    * 提供：
+    * - 线程安全的读写
+    * - 运算符重载
+    * - 事件通知
+    * 不负责字段的创建与注册。
+    */
     template<typename T>
     class FieldValue {
     public:
+        using Type = T;
+
+        /**
+         * @brief 获取字段值的只读引用
+         */
         auto operator*() const -> const T& {
             return value();
         }
 
+        /**
+         * @brief 指针访问运算符
+         */
+        auto operator->() -> T* {
+            return &value_->value;
+        }
+
+        auto operator->() const -> const T* {
+            return &value_->value;
+        }
+
+        /**
+         * @brief 获取字段值的只读引用
+         */
         [[nodiscard]] auto value() const -> const T& {
             return value_->value;
         }
 
+        /**
+         * @brief 获取字段值的引用
+         */
+        auto value() -> T& {
+            return value_->value;
+        }
+
+        /**
+         * @brief 赋值并触发变更事件
+         * @param rhs 新值
+         * @return 当前对象
+         */
         auto operator=(const T& rhs) -> FieldValue& {
             std::unique_lock lock(value_->value_mutex);
             value() = rhs;
@@ -347,37 +522,107 @@ namespace stdpp::config {
             return *this;
         }
 
+        /**
+         * @brief 赋值并触发变更事件
+         * @param rhs 新值
+         * @return 当前对象
+         */
         auto operator=(const FieldValue& rhs) -> FieldValue& {
+            if (rhs.value_ == value_) {
+                return *this;
+            }
             std::unique_lock lock(value_->value_mutex);
             value() = rhs.value();
             chang();
             return *this;
         }
 
+        auto operator++() -> FieldValue& {
+            std::unique_lock lock(value_->value_mutex);
+            ++value();
+            chang();
+            return *this;
+        }
+
+        auto operator--() -> FieldValue& {
+            std::unique_lock lock(value_->value_mutex);
+            --value();
+            chang();
+            return *this;
+        }
+
+        auto operator++(int) -> FieldValue& {
+            std::unique_lock lock(value_->value_mutex);
+            ++value();
+            chang();
+            return *this;
+        }
+
+        auto operator--(int) -> FieldValue& {
+            std::unique_lock lock(value_->value_mutex);
+            --value();
+            chang();
+            return *this;
+        }
+
+        template<typename... Args>
+        decltype(auto) operator()(Args&&... args) {
+            std::unique_lock lock(value_->value_mutex);
+            chang();
+            return value()(std::forward<Args>(args)...);
+        }
+
+        /**
+         * @brief 获取字段底层共享指针
+         */
         auto ptr() -> FEP<T> {
             return value_;
         }
 
+        [[nodiscard]] auto ptr() const -> FEP<T> {
+            return value_;
+        }
+
+        /**
+         * @brief 获取字段名称
+         */
         auto name() -> STR {
             return value_->name;
         }
 
+        /**
+        * @brief 获取字段类型索引
+        */
         auto type() -> std::type_index {
             return value_->type;
         }
 
+        /**
+         * @brief 获取字段类型名称（字符串）
+         */
         auto type_name() -> STR {
             return value_->type_name;
         }
 
-        auto write_lock() -> std::shared_ptr<std::unique_lock<std::shared_mutex>> {
-            return std::make_shared<std::unique_lock<std::shared_mutex>>(value_->value_mutex);
+        /**
+         * @brief 获取字段值的读锁
+         */
+        [[nodiscard]] auto read_lock() const -> FieldValueMutex {
+            return FieldValueMutex(value_, LockMode::Read);
         }
 
-        auto read_lock() -> std::shared_ptr<std::shared_lock<std::shared_mutex>> {
-            return std::make_shared<std::shared_lock<std::shared_mutex>>(value_->value_mutex);
+        /**
+         * @brief 获取字段值的写锁
+         *
+         * @note 写锁析构后不会自动触发 chang()
+         */
+        [[nodiscard]] auto write_lock() -> FieldValueMutex {
+            return FieldValueMutex(value_, LockMode::Write);
         }
 
+        /**
+         * @brief 主动标记字段发生变更并触发事件
+         */
         auto chang() -> void {
             value_->is_chang = true;
             Config::mark_dirty();
@@ -385,6 +630,12 @@ namespace stdpp::config {
             value_->events(value_, Event::VALUE_CHANG);
         }
 
+        /**
+         * @brief 从字段实体创建 FieldValue
+         * @tparam Type 字段实际类型
+         * @param entry 字段实体
+         * @return FieldValue 实例
+         */
         template<typename Type>
         static auto form_entry(const CFEP<Type>& entry) -> FieldValue {
             FieldValue value;
@@ -392,36 +643,69 @@ namespace stdpp::config {
             return value;
         }
 
+        /**
+         * @brief 从字段实体创建 FieldValue
+         * @tparam Type 字段实际类型
+         * @param entry 字段实体
+         * @return FieldValue 实例
+         */
         static auto form_entry(const FEBP& entry) -> FieldValue {
             return form_entry<T>(std::static_pointer_cast<FE<T>>(entry));
         }
 
+        /**
+         * @brief 为当前字段添加事件监听
+         * @param func 回调函数
+         * @return 事件句柄
+         */
         auto add_event(event::FastEvent<void, const FEBP&, const Event>::Func func) -> OPT<event::FastEvent<void, const FEBP&, const Event>::Handle> {
             return Config::add_event(value_, func);
         }
 
+        /**
+         * @brief 移除字段事件监听
+         * @param handle 事件句柄
+         */
         auto remove_event(const event::FastEvent<void, const FEBP&, const Event>::Handle handle) -> void {
             return Config::remove_event(value_, handle);
         }
 
     protected:
         FEP<T> value_;
-
-        auto value() -> T& {
-            return value_->value;
-        }
     };
 
+    /**
+     * @brief 强类型配置字段声明
+     * Field 在构造时会：
+     * - 自动注册到 Config
+     * - 自动参与配置加载 / 保存
+     * 推荐作为全局或静态对象使用。
+     */
     template<typename T>
     class Field : public FieldValue<T> {
     public:
+        using Type = T;
         using FieldValue<T>::operator=;
+        using FieldValue<T>::operator++;
+        using FieldValue<T>::operator--;
+        using FieldValue<T>::operator->;
+        using FieldValue<T>::operator*;
+        using FieldValue<T>::operator();
 
+        /**
+         * @brief 声明一个字段（无初始值）
+         * @param field_name 字段完整路径名
+         */
         explicit Field(const STR& field_name) {
             this->value_ = Config::find_or_create<T>(field_name, typeid(T).name());
             init(field_name);
         }
 
+        /**
+        * @brief 声明一个字段并提供初始值
+        * @param field_name 字段完整路径名
+        * @param args 构造初始值所需参数
+        */
         template<typename... Args>
         explicit Field(const STR& field_name, Args&&... args) {
             this->value_ = Config::find_or_create<T>(field_name, typeid(T).name(), std::forward<Args>(args)...);
@@ -430,6 +714,10 @@ namespace stdpp::config {
 
         ~Field() = default;
 
+        /**
+         * @brief 获取当前类型的所有字段实例
+         * @return 字段只读指针列表
+         */
         static auto get() -> std::vector<CFEP<T>> {
             std::unique_lock _(mutex);
             std::vector<CFEP<T>> v;
@@ -459,6 +747,15 @@ namespace stdpp::config {
         c.insert(c.end(), v);
     };
 
+    /**
+     * @brief STL 风格顺序容器的 JSON 编解码特化
+     * 支持：
+     * - vector / list / deque 等
+     * - 要求容器支持 insert(end(), value)
+     * JSON 表示为数组。
+     * @tparam C 容器模板
+     * @tparam T 元素类型
+     */
     template<template<class...> class C, typename T, typename... Args> requires HasInsert<C<T, Args...>, T>
     struct Codec<C<T, Args...>> {
         static auto encode(const C<T, Args...>& c) -> nlohmann::json {
@@ -482,6 +779,13 @@ namespace stdpp::config {
         }
     };
 
+    /**
+     * @brief 枚举类型的 JSON 编解码特化
+     * 使用 magic_enum：
+     * - JSON 中存储枚举名字符串
+     * - 解码时根据字符串反射枚举值
+     * @tparam E 枚举类型
+     */
     template<typename E> requires std::is_enum_v<E>
     struct Codec<E> {
         static auto encode(E v) -> nlohmann::json {
@@ -509,259 +813,424 @@ namespace stdpp::config {
 
     template<typename T>
     auto operator<=>(const FieldValue<T>& lhs, const FieldValue<T>& rhs) requires requires(const T& a, const T& b) { a <=> b; } {
+        auto _ = lhs.read_lock();
+        auto _ = rhs.read_lock();
         return lhs.value() <=> rhs.value();
     }
 
     template<typename T>
     auto operator==(const FieldValue<T>& lhs, const FieldValue<T>& rhs) requires requires(const T& a, const T& b) { a == b; } {
+        auto _ = lhs.read_lock();
+        auto _ = rhs.read_lock();
         return lhs.value() == rhs.value();
     }
 
     template<typename T>
     auto operator<(const FieldValue<T>& lhs, const T& rhs) -> bool {
+        auto _ = lhs.read_lock();
         return lhs.value() < rhs;
     }
 
     template<typename T>
     auto operator>(const FieldValue<T>& lhs, const T& rhs) -> bool {
+        auto _ = lhs.read_lock();
         return rhs < lhs.value();
     }
 
     template<typename T>
     auto operator<=(const FieldValue<T>& lhs, const T& rhs) -> bool {
+        auto _ = lhs.read_lock();
         return !(lhs > rhs);
     }
 
     template<typename T>
     auto operator>=(const FieldValue<T>& lhs, const T& rhs) -> bool {
+        auto _ = lhs.read_lock();
         return !(lhs < rhs);
     }
 
     template<typename T>
     auto operator==(const FieldValue<T>& lhs, const T& rhs) -> bool {
+        auto _ = lhs.read_lock();
         return lhs.value() == rhs;
     }
 
     template<typename T>
     auto operator<(const T& lhs, const FieldValue<T>& rhs) -> bool {
+        auto _ = rhs.read_lock();
         return lhs < rhs.value();
     }
 
     template<typename T>
     auto operator>(const T& lhs, const FieldValue<T>& rhs) -> bool {
+        auto _ = rhs.read_lock();
         return rhs.value() < lhs;
     }
 
     template<typename T>
     auto operator<=(const T& lhs, const FieldValue<T>& rhs) -> bool {
+        auto _ = rhs.read_lock();
         return !(lhs > rhs);
     }
 
     template<typename T>
     auto operator>=(const T& lhs, const FieldValue<T>& rhs) -> bool {
+        auto _ = rhs.read_lock();
         return !(lhs < rhs);
     }
 
     template<typename T>
     auto operator==(const T& lhs, const FieldValue<T>& rhs) -> bool {
+        auto _ = rhs.read_lock();
         return lhs == rhs.value();
     }
 
     template<typename T>
     auto operator+(const FieldValue<T>& lhs, const FieldValue<T>& rhs) -> T {
+        auto _ = lhs.read_lock();
+        auto _ = rhs.read_lock();
         return lhs.value() + rhs.value();
     }
 
     template<typename T>
     auto operator-(const FieldValue<T>& lhs, const FieldValue<T>& rhs) -> T {
+        auto _ = lhs.read_lock();
+        auto _ = rhs.read_lock();
         return lhs.value() - rhs.value();
     }
 
     template<typename T>
     auto operator*(const FieldValue<T>& lhs, const FieldValue<T>& rhs) -> T {
+        auto _ = lhs.read_lock();
+        auto _ = rhs.read_lock();
         return lhs.value() * rhs.value();
     }
 
     template<typename T>
     auto operator/(const FieldValue<T>& lhs, const FieldValue<T>& rhs) -> T {
+        auto _ = lhs.read_lock();
+        auto _ = rhs.read_lock();
         return lhs.value() / rhs.value();
     }
 
     template<typename T>
     auto operator+(const FieldValue<T>& lhs, const T& rhs) -> T {
+        auto _ = lhs.read_lock();
         return lhs.value() + rhs;
     }
 
     template<typename T>
     auto operator-(const FieldValue<T>& lhs, const T& rhs) -> T {
+        auto _ = lhs.read_lock();
         return lhs.value() - rhs;
     }
 
     template<typename T>
     auto operator*(const FieldValue<T>& lhs, const T& rhs) -> T {
+        auto _ = lhs.read_lock();
         return lhs.value() * rhs;
     }
 
     template<typename T>
     auto operator/(const FieldValue<T>& lhs, const T& rhs) -> T {
+        auto _ = lhs.read_lock();
         return lhs.value() / rhs;
     }
 
     template<typename T>
     auto operator+(const T& lhs, const FieldValue<T>& rhs) -> T {
+        auto _ = rhs.read_lock();
         return lhs + rhs.value();
     }
 
     template<typename T>
     auto operator-(const T& lhs, const FieldValue<T>& rhs) -> T {
+        auto _ = rhs.read_lock();
         return lhs - rhs.value();
     }
 
     template<typename T>
     auto operator*(const T& lhs, const FieldValue<T>& rhs) -> T {
+        auto _ = rhs.read_lock();
         return lhs * rhs.value();
     }
 
     template<typename T>
     auto operator/(const T& lhs, const FieldValue<T>& rhs) -> T {
+        auto _ = rhs.read_lock();
         return lhs / rhs.value();
     }
 
     template<typename T>
     auto operator+=(FieldValue<T>& lhs, const T& rhs) -> FieldValue<T>& {
+        auto _ = lhs.write_lock();
         lhs.value() += rhs;
         lhs.chang();
         return lhs;
     }
 
     template<typename T>
+    auto operator+=(T& lhs, FieldValue<T>& rhs) -> T& {
+        auto _ = rhs.read_lock();
+        lhs += rhs.value();
+        return lhs;
+    }
+
+    template<typename T>
     auto operator-=(FieldValue<T>& lhs, const T& rhs) -> FieldValue<T>& {
+        auto _ = lhs.write_lock();
         lhs.value() -= rhs;
         lhs.chang();
         return lhs;
     }
 
     template<typename T>
+    auto operator-=(T& lhs, FieldValue<T>& rhs) -> T& {
+        auto _ = rhs.read_lock();
+        lhs -= rhs.value();
+        return lhs;
+    }
+
+    template<typename T>
     auto operator*=(FieldValue<T>& lhs, const T& rhs) -> FieldValue<T>& {
+        auto _ = lhs.write_lock();
         lhs.value() *= rhs;
         lhs.chang();
         return lhs;
     }
 
     template<typename T>
+    auto operator*=(T& lhs, FieldValue<T>& rhs) -> T& {
+        auto _ = rhs.read_lock();
+        lhs *= rhs.value();
+        return lhs;
+    }
+
+    template<typename T>
     auto operator/=(FieldValue<T>& lhs, const T& rhs) -> FieldValue<T>& {
+        auto _ = lhs.write_lock();
         lhs.value() /= rhs;
         lhs.chang();
         return lhs;
     }
 
     template<typename T>
+    auto operator/=(T& lhs, FieldValue<T>& rhs) -> T& {
+        auto _ = rhs.read_lock();
+        lhs /= rhs.value();
+        return lhs;
+    }
+
+    template<typename T>
     auto operator+=(FieldValue<T>& lhs, const FieldValue<T>& rhs) -> FieldValue<T>& {
-        lhs.value() += rhs.value();
+        auto _ = lhs.write_lock();
+        if (lhs.ptr() == rhs.ptr()) {
+            lhs.value() += rhs.value();
+        } else {
+            auto _ = rhs.read_lock();
+            lhs.value() += rhs.value();
+        }
         lhs.chang();
         return lhs;
     }
 
-    template<typename T> concept Bitwiseable = std::is_integral_v<T> || std::is_enum_v<T>;
+    template<typename T>
+    auto operator-=(FieldValue<T>& lhs, const FieldValue<T>& rhs) -> FieldValue<T>& {
+        auto _ = lhs.write_lock();
+        if (lhs.ptr() == rhs.ptr()) {
+            lhs.value() -= rhs.value();
+        } else {
+            auto _ = rhs.read_lock();
+            lhs.value() -= rhs.value();
+        }
+        lhs.chang();
+        return lhs;
+    }
 
-    template<Bitwiseable T>
+    template<typename T>
+    auto operator*=(FieldValue<T>& lhs, const FieldValue<T>& rhs) -> FieldValue<T>& {
+        auto _ = lhs.write_lock();
+        if (lhs.ptr() == rhs.ptr()) {
+            lhs.value() *= rhs.value();
+        } else {
+            auto _ = rhs.read_lock();
+            lhs.value() *= rhs.value();
+        }
+        lhs.chang();
+        return lhs;
+    }
+
+    template<typename T>
+    auto operator/=(FieldValue<T>& lhs, const FieldValue<T>& rhs) -> FieldValue<T>& {
+        auto _ = lhs.write_lock();
+        if (lhs.ptr() == rhs.ptr()) {
+            lhs.value() /= rhs.value();
+        } else {
+            auto _ = rhs.read_lock();
+            lhs.value() /= rhs.value();
+        }
+        lhs.chang();
+        return lhs;
+    }
+
+    template<typename T>
     auto operator&(const FieldValue<T>& lhs, const FieldValue<T>& rhs) -> T {
+        auto _ = lhs.read_lock();
+        auto _ = rhs.read_lock();
         return lhs.value() & rhs.value();
     }
 
-    template<Bitwiseable T>
+    template<typename T>
     auto operator|(const FieldValue<T>& lhs, const FieldValue<T>& rhs) -> T {
+        auto _ = lhs.read_lock();
+        auto _ = rhs.read_lock();
         return lhs.value() | rhs.value();
     }
 
-    template<Bitwiseable T>
+    template<typename T>
     auto operator^(const FieldValue<T>& lhs, const FieldValue<T>& rhs) -> T {
+        auto _ = lhs.read_lock();
+        auto _ = rhs.read_lock();
         return lhs.value() ^ rhs.value();
     }
 
-    template<Bitwiseable T>
+    template<typename T>
     auto operator&(const FieldValue<T>& lhs, T rhs) -> T {
+        auto _ = lhs.read_lock();
         return lhs.value() & rhs;
     }
 
-    template<Bitwiseable T>
+    template<typename T>
     auto operator|(const FieldValue<T>& lhs, T rhs) -> T {
+        auto _ = lhs.read_lock();
         return lhs.value() | rhs;
     }
 
-    template<Bitwiseable T>
+    template<typename T>
     auto operator^(const FieldValue<T>& lhs, T rhs) -> T {
+        auto _ = lhs.read_lock();
         return lhs.value() ^ rhs;
     }
 
-    template<Bitwiseable T>
+    template<typename T>
     auto operator&(T lhs, const FieldValue<T>& rhs) -> T {
+        auto _ = rhs.read_lock();
         return lhs & rhs.value();
     }
 
-    template<Bitwiseable T>
+    template<typename T>
     auto operator|(T lhs, const FieldValue<T>& rhs) -> T {
+        auto _ = rhs.read_lock();
         return lhs | rhs.value();
     }
 
-    template<Bitwiseable T>
+    template<typename T>
     auto operator^(T lhs, const FieldValue<T>& rhs) -> T {
+        auto _ = rhs.read_lock();
         return lhs ^ rhs.value();
     }
 
-    template<Bitwiseable T>
+    template<typename T>
     auto operator<<(const FieldValue<T>& lhs, std::size_t shift) -> T {
+        auto _ = lhs.read_lock();
         return lhs.value() << shift;
     }
 
-    template<Bitwiseable T>
+    template<typename T>
     auto operator>>(const FieldValue<T>& lhs, std::size_t shift) -> T {
+        auto _ = lhs.read_lock();
         return lhs.value() >> shift;
     }
 
-    template<Bitwiseable T>
+    template<typename T>
     auto operator~(const FieldValue<T>& v) -> T {
+        auto _ = v.read_lock();
         return ~v.value();
     }
 
-    template<Bitwiseable T>
+    template<typename T>
     auto operator&=(FieldValue<T>& lhs, T rhs) -> FieldValue<T>& {
+        auto _ = lhs.write_lock();
         lhs.value() &= rhs;
         lhs.chang();
         return lhs;
     }
 
-    template<Bitwiseable T>
+    template<typename T>
+    auto operator&=(T& lhs, FieldValue<T>& rhs) -> T& {
+        auto _ = rhs.read_lock();
+        lhs &= rhs.value();
+        rhs.chang();
+        return lhs;
+    }
+
+    template<typename T>
     auto operator|=(FieldValue<T>& lhs, T rhs) -> FieldValue<T>& {
+        auto _ = lhs.write_lock();
         lhs.value() |= rhs;
         lhs.chang();
         return lhs;
     }
 
-    template<Bitwiseable T>
+    template<typename T>
+    auto operator|=(T& lhs, FieldValue<T>& rhs) -> T& {
+        auto _ = rhs.read_lock();
+        lhs |= rhs.value();
+        rhs.chang();
+        return lhs;
+    }
+
+    template<typename T>
     auto operator^=(FieldValue<T>& lhs, T rhs) -> FieldValue<T>& {
+        auto _ = lhs.write_lock();
         lhs.value() ^= rhs;
         lhs.chang();
         return lhs;
     }
 
-    template<Bitwiseable T>
+    template<typename T>
+    auto operator^=(T& lhs, FieldValue<T>& rhs) -> T& {
+        auto _ = rhs.read_lock();
+        lhs ^= rhs.value();
+        rhs.chang();
+        return lhs;
+    }
+
+    template<typename T>
     auto operator&=(FieldValue<T>& lhs, const FieldValue<T>& rhs) -> FieldValue<T>& {
-        lhs.value() &= rhs.value();
+        auto _ = lhs.write_lock();
+        if (lhs.ptr() == rhs.ptr()) {
+            lhs.value() &= rhs.value();
+        } else {
+            auto _ = rhs.read_lock();
+            lhs.value() &= rhs.value();
+        }
         lhs.chang();
         return lhs;
     }
 
-    template<Bitwiseable T>
+    template<typename T>
     auto operator|=(FieldValue<T>& lhs, const FieldValue<T>& rhs) -> FieldValue<T>& {
-        lhs.value() |= rhs.value();
+        auto _ = lhs.write_lock();
+        if (lhs.ptr() == rhs.ptr()) {
+            lhs.value() |= rhs.value();
+        } else {
+            auto _ = rhs.read_lock();
+            lhs.value() |= rhs.value();
+        }
         lhs.chang();
         return lhs;
     }
 
-    template<Bitwiseable T>
+    template<typename T>
     auto operator^=(FieldValue<T>& lhs, const FieldValue<T>& rhs) -> FieldValue<T>& {
-        lhs.value() ^= rhs.value();
+        auto _ = lhs.write_lock();
+        if (lhs.ptr() == rhs.ptr()) {
+            lhs.value() ^= rhs.value();
+        } else {
+            auto _ = rhs.read_lock();
+            lhs.value() ^= rhs.value();
+        }
         lhs.chang();
         return lhs;
     }
