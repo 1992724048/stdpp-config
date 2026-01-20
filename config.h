@@ -1,5 +1,8 @@
 ﻿#pragma once
 
+// https://github.com/1992724048/stdpp-config
+// 1.0.0
+
 #include <unordered_map>
 #include <string>
 #include <string_view>
