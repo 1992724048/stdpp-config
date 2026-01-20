@@ -245,6 +245,75 @@ Enum containers (e.g. `std::vector<Enum>`) are automatically supported via the g
 
 ---
 
+## Operator Support
+
+`FieldValue<T>` are designed to behave **like ordinary variables**.
+For numeric and bitwise-capable types, a comprehensive set of operators is provided.
+
+> **Requirement**
+> All operators are only available if the underlying type `T` itself supports the corresponding C++ operator (`+ - * / | & ^`, etc.).
+
+``` c++
+    Field<std::function<int(int)>> port0("test");
+    Field<int> port("server::port");
+    Field<int> port2("server::port", 255);
+
+    int i{ 0 };
+
+    port |= 1;
+    port ^= 1;
+    port &= 1;
+    port -= 1;
+    port += 1;
+    port *= 1;
+    port /= 1;
+    port = 1;
+    port = port;
+    port = port2;
+    port += port2;
+    port -= port2;
+    port *= port2;
+    port /= port2;
+    port |= port2;
+    port ^= port2;
+    port &= port2;
+    port2 = port;
+    i = i + port;
+    i = i - port;
+    i = i * port;
+    i = i / port;
+    i = i | port;
+    i = i ^ port;
+    i = i & port;
+    i = port + 1;
+    i = port - 1;
+    i = port * 1;
+    i = port / 1;
+    i = port | 1;
+    i = port ^ 1;
+    i = port & 1;
+    i += port;
+    i -= port;
+    i *= port;
+    i /= port;
+    i |= port;
+    i ^= port;
+    i &= port;
+
+    --port;
+    ++port;
+    port--;
+    port++;
+
+    port0 = [](const int a) {
+        return a;
+    };
+
+    port0(1);
+```
+
+---
+
 ## Custom Type Serialization
 
 To support a custom type, specialize `Codec<T>`:
