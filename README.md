@@ -55,7 +55,7 @@ configuration entries are represented as strongly typed objects in code. Reading
 ### Define configuration fields
 
 ```cpp
-#include "config.hpp"
+#include "config.h"
 
 using namespace stdpp::config;
 
