@@ -299,6 +299,10 @@ For numeric and bitwise-capable types, a comprehensive set of operators is provi
     i |= port;
     i ^= port;
     i &= port;
+    port >> 1;
+    port << 1;
+    port >>= 1;
+    port <<= 1;
 
     --port;
     ++port;
