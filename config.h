@@ -1,7 +1,7 @@
 ﻿#pragma once
 
 // https://github.com/1992724048/stdpp-config
-// 1.0.1
+// 1.0.2
 
 #include <unordered_map>
 #include <string>
@@ -1137,9 +1137,23 @@ namespace stdpp::config {
     }
 
     template<typename T>
+    auto operator<<=(const FieldValue<T>& lhs, std::size_t shift) -> T {
+        auto _ = lhs.write_lock();
+        lhs.chang();
+        return lhs.value() <<= shift;
+    }
+
+    template<typename T>
     auto operator>>(const FieldValue<T>& lhs, std::size_t shift) -> T {
         auto _ = lhs.read_lock();
         return lhs.value() >> shift;
+    }
+
+    template<typename T>
+    auto operator>>=(const FieldValue<T>& lhs, std::size_t shift) -> T {
+        auto _ = lhs.write_lock();
+        lhs.chang();
+        return lhs.value() >>= shift;
     }
 
     template<typename T>
@@ -1160,7 +1174,6 @@ namespace stdpp::config {
     auto operator&=(T& lhs, FieldValue<T>& rhs) -> T& {
         auto _ = rhs.read_lock();
         lhs &= rhs.value();
-        rhs.chang();
         return lhs;
     }
 
@@ -1176,7 +1189,6 @@ namespace stdpp::config {
     auto operator|=(T& lhs, FieldValue<T>& rhs) -> T& {
         auto _ = rhs.read_lock();
         lhs |= rhs.value();
-        rhs.chang();
         return lhs;
     }
 
@@ -1192,7 +1204,6 @@ namespace stdpp::config {
     auto operator^=(T& lhs, FieldValue<T>& rhs) -> T& {
         auto _ = rhs.read_lock();
         lhs ^= rhs.value();
-        rhs.chang();
         return lhs;
     }
 
