@@ -1,7 +1,7 @@
 ﻿#pragma once
 
 // https://github.com/1992724048/stdpp-config
-// 1.1.0
+// 1.2.0
 
 #include <unordered_map>
 #include <string>
@@ -20,6 +20,7 @@
 #include <optional>
 #include <variant>
 #include <chrono>
+#include <any>
 
 // ToruNiina/toml11 4.4.0
 #include "toml11/toml.hpp"
@@ -63,10 +64,13 @@ namespace stdpp::config {
         }
     };
 
-    template<typename T> concept Serializable = requires(const T& v, const toml::value& tv) {
-        { Codec<T>::encode(v) } -> std::same_as<toml::value>; { Codec<T>::decode(tv) } -> std::same_as<T>;
-    };
-
+    template<typename T> concept Serializable = requires(const T& t, const toml::value& v) {
+        { Codec<T>::encode(t) } -> std::same_as<toml::value>;
+    } && (requires(const toml::value& v2) {
+            { Codec<T>::decode(v2) } -> std::same_as<T>;
+        } || requires(T& t2, const toml::value& v2) {
+            { Codec<T>::decode_into(v2, t2) } -> std::same_as<void>;
+        });
 
     template<typename T>
     class Field;
@@ -157,7 +161,11 @@ namespace stdpp::config {
         auto decode(const toml::value& value_toml) -> void override {
             std::shared_lock _(toml_mutex);
             std::unique_lock _(value_mutex);
-            value = Codec<T>::decode(value_toml);
+            if constexpr (requires { Codec<T>::decode_into(value_toml, value); }) {
+                Codec<T>::decode_into(value_toml, value);
+            } else {
+                value = Codec<T>::decode(value_toml);
+            }
         }
     };
 
@@ -776,6 +784,17 @@ namespace stdpp::config {
         typename M::key_type; typename M::mapped_type; typename M::value_type;
     };
 
+    template<typename Q> concept AdapterLike = requires(Q q) {
+        q.empty(); q.pop();
+    };
+
+    template<typename P>
+    using ElementTypeT = P::element_type;
+
+    template<typename P> concept PointerLike = requires(P p) {
+        typename ElementTypeT<P>; { p.get() } -> std::same_as<ElementTypeT<P>*>; static_cast<bool>(p);
+    };
+
     /**
      * @brief STL 风格顺序容器的 TOML 编解码特化
      * 支持：
@@ -807,6 +826,152 @@ namespace stdpp::config {
             return c;
         }
     };
+
+    template<typename Q>
+    struct AdapterTraits;
+
+    template<typename T, typename Container>
+    struct AdapterTraits<std::queue<T, Container>> {
+        using value_type = T;
+
+        static auto get(const std::queue<T, Container>& q) -> const T& {
+            return q.front();
+        }
+
+        static auto pop(std::queue<T, Container>& q) -> void {
+            q.pop();
+        }
+
+        static auto push(std::queue<T, Container>& q, T&& v) -> void {
+            q.push(std::move(v));
+        }
+
+        static constexpr bool reverse_on_decode = false;
+    };
+
+    template<typename T, typename Container>
+    struct AdapterTraits<std::stack<T, Container>> {
+        using value_type = T;
+
+        static auto get(const std::stack<T, Container>& s) -> const T& {
+            return s.top();
+        }
+
+        static auto pop(std::stack<T, Container>& s) -> void {
+            s.pop();
+        }
+
+        static auto push(std::stack<T, Container>& s, T&& v) -> void {
+            s.push(std::move(v));
+        }
+
+        static constexpr bool reverse_on_decode = true;
+    };
+
+    template<typename T, typename Container, typename Compare>
+    struct AdapterTraits<std::priority_queue<T, Container, Compare>> {
+        using value_type = T;
+
+        static auto get(const std::priority_queue<T, Container, Compare>& pq) -> const T& {
+            return pq.top();
+        }
+
+        static auto pop(std::priority_queue<T, Container, Compare>& pq) -> void {
+            pq.pop();
+        }
+
+        static auto push(std::priority_queue<T, Container, Compare>& pq, T&& v) -> void {
+            pq.push(std::move(v));
+        }
+
+        static constexpr bool reverse_on_decode = false;
+    };
+
+    /**
+     * @brief 单向链表(std::forward_list)的 TOML 编解码特化
+     * 支持：
+     * - std::forward_list<T, Alloc>
+     * TOML 表示为数组：
+     *   [e0, e1, e2, ...]
+     * 顺序与链表遍历顺序一致(front -> next -> ...)
+     * @tparam T 元素类型
+     * @tparam Alloc 分配器类型
+     */
+    template<typename T, typename Alloc>
+    struct Codec<std::forward_list<T, Alloc>> {
+        static auto encode(const std::forward_list<T, Alloc>& l) -> toml::value {
+            toml::array arr;
+            for (const auto& e : l) {
+                arr.push_back(Codec<T>::encode(e));
+            }
+            return arr;
+        }
+
+        static auto decode(const toml::value& v) -> std::forward_list<T, Alloc> {
+            if (!v.is_array()) {
+                throw std::runtime_error("forward_list decode failed: toml is not array");
+            }
+
+            std::forward_list<T, Alloc> l;
+            auto before = l.before_begin();
+            for (const auto& e : v.as_array()) {
+                before = l.insert_after(before, Codec<T>::decode(e));
+            }
+            return l;
+        }
+    };
+
+    /**
+     * @brief 容器适配器(queue / stack / priority_queue)的 TOML 编解码统一实现
+     * TOML 表示为数组：
+     *   [e0, e1, e2, ...]
+     * 顺序由 AdapterTraits 控制。
+     * @tparam Q 容器适配器类型
+     */
+    template<AdapterLike Q> requires requires { typename AdapterTraits<Q>::value_type; }
+    struct CodecAdapter {
+        using Traits = AdapterTraits<Q>;
+        using T = Traits::value_type;
+
+        static auto encode(const Q& q) -> toml::value {
+            toml::array arr;
+            auto copy = q;
+            while (!copy.empty()) {
+                arr.push_back(Codec<T>::encode(Traits::get(copy)));
+                Traits::pop(copy);
+            }
+            return arr;
+        }
+
+        static auto decode(const toml::value& v) -> Q {
+            if (!v.is_array()) {
+                throw std::runtime_error("adapter decode failed: toml is not array");
+            }
+
+            Q q;
+            const auto& a = v.as_array();
+
+            if constexpr (Traits::reverse_on_decode) {
+                for (auto it = a.rbegin(); it != a.rend(); ++it) {
+                    Traits::push(q, Codec<T>::decode(*it));
+                }
+            } else {
+                for (const auto& e : a) {
+                    Traits::push(q, Codec<T>::decode(e));
+                }
+            }
+            return q;
+        }
+    };
+
+    template<typename T, typename Container>
+    struct Codec<std::queue<T, Container>> : CodecAdapter<std::queue<T, Container>> {};
+
+    template<typename T, typename Container>
+    struct Codec<std::stack<T, Container>> : CodecAdapter<std::stack<T, Container>> {};
+
+    template<typename T, typename Container, typename Compare>
+    struct Codec<std::priority_queue<T, Container, Compare>> : CodecAdapter<std::priority_queue<T, Container, Compare>> {};
 
     /**
      * @brief 二元组(pair)的 TOML 编解码特化
@@ -977,8 +1142,7 @@ namespace stdpp::config {
                 throw std::runtime_error("optional decode failed: missing 'has'");
             }
 
-            const bool has = toml::get<bool>(tbl.at("has"));
-            if (!has) {
+            if (!toml::get<bool>(tbl.at("has"))) {
                 return std::nullopt;
             }
 
@@ -1047,10 +1211,10 @@ namespace stdpp::config {
 
         static auto encode(const HMS& t) -> toml::value {
             toml::table tbl;
-            tbl["hh"] = t.hours().count();
-            tbl["mm"] = t.minutes().count();
-            tbl["ss"] = t.seconds().count();
-            tbl["sub"] = t.subseconds().count();
+            tbl["hours"] = t.hours().count();
+            tbl["minutes"] = t.minutes().count();
+            tbl["seconds"] = t.seconds().count();
+            tbl["subseconds"] = t.subseconds().count();
             return tbl;
         }
 
@@ -1059,16 +1223,333 @@ namespace stdpp::config {
                 throw std::runtime_error("hh_mm_ss decode failed: toml is not table");
             }
             const auto& tbl = v.as_table();
-            if (!tbl.contains("hh") || !tbl.contains("mm") || !tbl.contains("ss") || !tbl.contains("sub")) {
+            if (!tbl.contains("hours") || !tbl.contains("minutes") || !tbl.contains("seconds") || !tbl.contains("subseconds")) {
                 throw std::runtime_error("hh_mm_ss decode failed: missing field");
             }
 
-            const auto h = std::chrono::hours(toml::get<int64_t>(tbl.at("hh")));
-            const auto m = std::chrono::minutes(toml::get<int64_t>(tbl.at("mm")));
-            const auto s = std::chrono::seconds(toml::get<int64_t>(tbl.at("ss")));
-            auto sub = Duration(toml::get<typename Duration::rep>(tbl.at("sub")));
+            const auto h = std::chrono::hours(toml::get<int64_t>(tbl.at("hours")));
+            const auto m = std::chrono::minutes(toml::get<int64_t>(tbl.at("minutes")));
+            const auto s = std::chrono::seconds(toml::get<int64_t>(tbl.at("seconds")));
+            auto sub = Duration(toml::get<typename Duration::rep>(tbl.at("subseconds")));
 
             return HMS{h + m + s + sub};
+        }
+    };
+
+    /**
+     * @brief 系统时间点(std::chrono::sys_time)的 TOML 编解码特化
+     * TOML 表示为 ISO-8601 字符串：
+     *   "2026-01-25T13:45:30Z"
+     * @tparam Duration 时间精度
+     */
+    template<typename Duration>
+    struct Codec<std::chrono::sys_time<Duration>> {
+        static auto encode(const std::chrono::sys_time<Duration>& t) -> toml::value {
+            auto tp = std::chrono::time_point_cast<std::chrono::seconds>(t);
+            return std::format("{:%FT%TZ}", tp);
+        }
+
+        static auto decode(const toml::value& v) -> std::chrono::sys_time<Duration> {
+            if (!v.is_string()) {
+                throw std::runtime_error("sys_time decode failed: not string");
+            }
+
+            std::istringstream iss(toml::get<std::string>(v));
+            std::chrono::sys_time<Duration> tp;
+            iss >> std::chrono::parse("%FT%TZ", tp);
+            if (iss.fail()) {
+                throw std::runtime_error("sys_time decode failed: parse error");
+            }
+
+            return tp;
+        }
+    };
+
+    /**
+     * @brief 日期类型(std::chrono::year_month_day)的 TOML 编解码特化
+     * TOML 表示为对象：
+     *   { y = 2026, m = 1, d = 25 }
+     */
+    template<>
+    struct Codec<std::chrono::year_month_day> {
+        static auto encode(const std::chrono::year_month_day& d) -> toml::value {
+            toml::table tbl;
+            tbl["year"] = static_cast<int>(d.year());
+            tbl["month"] = static_cast<unsigned>(d.month());
+            tbl["day"] = static_cast<unsigned>(d.day());
+            return tbl;
+        }
+
+        static auto decode(const toml::value& v) -> std::chrono::year_month_day {
+            if (!v.is_table()) {
+                throw std::runtime_error("ymd decode failed: not table");
+            }
+
+            const auto& t = v.as_table();
+            return std::chrono::year{toml::get<int>(t.at("year"))} / toml::get<unsigned>(t.at("month")) / toml::get<unsigned>(t.at("day"));
+        }
+    };
+
+    /**
+     * @brief 带时区时间(std::chrono::zoned_time)的 TOML 编解码特化
+     * TOML 表示为对象：
+     *   { zone = "Asia/Shanghai", time = "2026-01-25T13:45:30Z" }
+     * @tparam Duration 时间精度
+     */
+    template<typename Duration>
+    struct Codec<std::chrono::zoned_time<Duration>> {
+        using ZT = std::chrono::zoned_time<Duration>;
+        using ST = std::chrono::sys_time<Duration>;
+
+        static auto encode(const ZT& zt) -> toml::value {
+            toml::table tbl;
+            tbl["zone"] = std::string(zt.get_time_zone()->name());
+            tbl["time"] = Codec<ST>::encode(zt.get_sys_time());
+            return tbl;
+        }
+
+        static auto decode(const toml::value& v) -> ZT {
+            if (!v.is_table()) {
+                throw std::runtime_error("zoned_time decode failed: not table");
+            }
+
+            const auto& t = v.as_table();
+            if (!t.contains("zone") || !t.contains("time")) {
+                throw std::runtime_error("zoned_time decode failed: missing field");
+            }
+
+            const auto zone_name = toml::get<std::string>(t.at("zone"));
+            auto st = Codec<ST>::decode(t.at("time"));
+
+            const std::chrono::time_zone* tz = std::chrono::get_tzdb().locate_zone(zone_name);
+
+            return ZT{tz, st};
+        }
+    };
+
+    /**
+     * @brief 时间间隔(std::chrono::duration)的 TOML 编解码特化
+     * TOML 表示为对象：
+     *   { count = 1500, unit = "ms" }
+     * @tparam Rep  数值类型
+     * @tparam Period 时间单位
+     */
+    template<typename Rep, typename Period>
+    struct Codec<std::chrono::duration<Rep, Period>> {
+        using D = std::chrono::duration<Rep, Period>;
+
+        static auto encode(const D& d) -> toml::value {
+            toml::table tbl;
+            tbl["count"] = d.count();
+            tbl["unit"] = unit_name();
+            return tbl;
+        }
+
+        static auto decode(const toml::value& v) -> D {
+            if (!v.is_table()) {
+                throw std::runtime_error("duration decode failed: not table");
+            }
+
+            const auto& t = v.as_table();
+            if (!t.contains("count") || !t.contains("unit")) {
+                throw std::runtime_error("duration decode failed: missing field");
+            }
+
+            const auto unit = toml::get<std::string>(t.at("unit"));
+            if (unit != unit_name()) {
+                throw std::runtime_error("duration decode failed: unit mismatch");
+            }
+
+            return D{toml::get<Rep>(t.at("count"))};
+        }
+
+    private:
+        static auto unit_name() -> std::string {
+            if constexpr (std::is_same_v<Period, std::nano>) {
+                return "ns";
+            }
+            if constexpr (std::is_same_v<Period, std::micro>) {
+                return "us";
+            }
+            if constexpr (std::is_same_v<Period, std::milli>) {
+                return "ms";
+            }
+            if constexpr (std::is_same_v<Period, std::ratio<1>>) {
+                return "s";
+            }
+            if constexpr (std::is_same_v<Period, std::ratio<60>>) {
+                return "min";
+            }
+            if constexpr (std::is_same_v<Period, std::ratio<3600>>) {
+                return "h";
+            } else {
+                return "custom";
+            }
+        }
+    };
+
+    /**
+     * @brief 指针型包装器(std::unique_ptr / std::shared_ptr)的统一 TOML 编解码
+     * TOML 表示为对象：
+     *   { has = false }
+     *   { has = true, value = T }
+     */
+    template<PointerLike P>
+    struct Codec<P> {
+        using T = ElementTypeT<P>;
+
+        static auto encode(const P& p) -> toml::value {
+            toml::table tbl;
+            if (!p) {
+                tbl["has"] = false;
+            } else {
+                tbl["has"] = true;
+                tbl["value"] = Codec<T>::encode(*p);
+            }
+            return tbl;
+        }
+
+        static auto decode(const toml::value& v) -> P {
+            if (!v.is_table()) {
+                throw std::runtime_error("pointer decode failed: toml is not table");
+            }
+
+            const auto& t = v.as_table();
+            if (!t.contains("has")) {
+                throw std::runtime_error("pointer decode failed: missing 'has'");
+            }
+
+            if (!toml::get<bool>(t.at("has"))) {
+                return P{};
+            }
+
+            if (!t.contains("value")) {
+                throw std::runtime_error("pointer decode failed: missing 'value'");
+            }
+
+            auto obj = Codec<T>::decode(t.at("value"));
+
+            if constexpr (std::is_same_v<P, std::unique_ptr<T>>) {
+                return std::make_unique<T>(std::move(obj));
+            } else if constexpr (std::is_same_v<P, std::shared_ptr<T>>) {
+                return std::make_shared<T>(std::move(obj));
+            } else {
+                static_assert(sizeof(P) == 0, "Unsupported pointer type");
+            }
+            return P{};
+        }
+    };
+
+    /**
+     * @brief 原子类型(std::atomic<T>)的 TOML 编解码特化
+     * TOML 表示为：
+     * - 与 T 相同的表示形式
+     * @tparam T 原子内部值类型
+     */
+    template<typename T> requires std::is_trivially_copyable_v<T>
+    struct Codec<std::atomic<T>> {
+        static auto encode(const std::atomic<T>& a) -> toml::value {
+            return Codec<T>::encode(a.load(std::memory_order_relaxed));
+        }
+
+        static auto decode_into(const toml::value& v, std::atomic<T>& a) -> void {
+            a.store(Codec<T>::decode(v), std::memory_order_relaxed);
+        }
+    };
+
+    /**
+     * @brief 结果类型(std::expected<T,E>)的 TOML 编解码特化
+     * TOML 表示为对象：
+     *   { has = true, value = ... }
+     *   { has = false, error = ... }
+     */
+    template<typename T, typename E>
+    struct Codec<std::expected<T, E>> {
+        static auto encode(const std::expected<T, E>& e) -> toml::value {
+            toml::table tbl;
+            if (e.has_value()) {
+                tbl["has"] = true;
+                tbl["value"] = Codec<T>::encode(*e);
+            } else {
+                tbl["has"] = false;
+                tbl["error"] = Codec<E>::encode(e.error());
+            }
+            return tbl;
+        }
+
+        static auto decode(const toml::value& v) -> std::expected<T, E> {
+            if (!v.is_table()) {
+                throw std::runtime_error("expected decode failed: not table");
+            }
+
+            const auto& t = v.as_table();
+            if (toml::get<bool>(t.at("has"))) {
+                return Codec<T>::decode(t.at("value"));
+            }
+            return std::unexpected(Codec<E>::decode(t.at("error")));
+        }
+    };
+
+    /**
+     * @brief 复数(std::complex<T>)的 TOML 编解码特化
+     * TOML 表示为数组：
+     *   [ real, imag ]
+     */
+    template<typename T>
+    struct Codec<std::complex<T>> {
+        static auto encode(const std::complex<T>& c) -> toml::value {
+            toml::array arr;
+            arr.push_back(c.real());
+            arr.push_back(c.imag());
+            return arr;
+        }
+
+        static auto decode(const toml::value& v) -> std::complex<T> {
+            if (!v.is_array() || v.as_array().size() != 2) {
+                throw std::runtime_error("complex decode failed: not [2]");
+            }
+
+            const auto& a = v.as_array();
+            return {toml::get<T>(a[0]), toml::get<T>(a[1])};
+        }
+    };
+
+    /**
+     * @brief 位集合(std::bitset<N>)的 TOML 编解码特化
+     * TOML 表示为二进制字符串：
+     *   "10101001"
+     */
+    template<std::size_t N>
+    struct Codec<std::bitset<N>> {
+        static auto encode(const std::bitset<N>& b) -> toml::value {
+            return b.to_string();
+        }
+
+        static auto decode(const toml::value& v) -> std::bitset<N> {
+            if (!v.is_string()) {
+                throw std::runtime_error("bitset decode failed: not string");
+            }
+
+            auto s = toml::get<std::string>(v);
+            if (s.size() != N) {
+                throw std::runtime_error("bitset decode failed: size mismatch");
+            }
+
+            return std::bitset<N>(s);
+        }
+    };
+
+    /**
+     * @brief 路径类型特化
+     */
+    template<>
+    struct Codec<std::filesystem::path> {
+        static auto encode(const std::filesystem::path& p) -> toml::value {
+            return p.string();
+        }
+
+        static auto decode(const toml::value& v) -> std::filesystem::path {
+            return std::filesystem::path(toml::get<std::string>(v));
         }
     };
 
@@ -1538,4 +2019,3 @@ namespace stdpp::config {
         return lhs;
     }
 }
-
