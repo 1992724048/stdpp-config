@@ -176,7 +176,7 @@ vec = [1,2,3]
 
 [test.opt]
 has = false
-// value = 114
+# value = 114
 
 [app]
 mode = "A"
