@@ -21,7 +21,7 @@
 #include <variant>
 #include <chrono>
 
-// nlohmann/json 3.12.0
+// ToruNiina/toml11 4.4.0
 #include "toml11/toml.hpp"
 // Neargye/magic_enum 0.9.7
 #include "magic_enum/magic_enum.hpp"
@@ -1538,3 +1538,4 @@ namespace stdpp::config {
         return lhs;
     }
 }
+
