@@ -1,7 +1,7 @@
 ﻿#pragma once
 
 // https://github.com/1992724048/stdpp-config
-// 1.0.2
+// 1.1.0
 
 #include <unordered_map>
 #include <string>
@@ -16,10 +16,13 @@
 #include <ranges>
 #include <type_traits>
 #include <shared_mutex>
+#include <array>
 #include <optional>
+#include <variant>
+#include <chrono>
 
 // nlohmann/json 3.12.0
-#include "json/json.hpp"
+#include "toml11/toml.hpp"
 // Neargye/magic_enum 0.9.7
 #include "magic_enum/magic_enum.hpp"
 // 1992724048/stdpp-event 1.0.2
@@ -41,28 +44,29 @@ namespace stdpp::config {
     enum class LockMode { Read, Write };
 
     /**
-     * @brief 类型到 JSON 的编解码器
-     * Codec<T> 定义类型 T 与 nlohmann::json 之间的转换规则。
+     * @brief 类型到 TOML 的编解码器
+     * Codec<T> 定义类型 T 与 toml::value 之间的转换规则。
      * 默认行为：
-     * - encode：直接返回 JSON 可隐式构造的值
-     * - decode：使用 json.get<T>()
+     * - encode：直接返回 toml::value 可隐式构造的值
+     * - decode：使用 toml::get<T>()
      * 用户可以通过特化 Codec<T> 来支持自定义类型。
      * @tparam T 可序列化类型
      */
     template<typename T>
     struct Codec {
-        static auto encode(const T& v) -> nlohmann::json {
-            return v;
+        static auto encode(const T& v) -> toml::value {
+            return toml::value(v);
         }
 
-        static auto decode(const nlohmann::json& j) -> T {
-            return j.get<T>();
+        static auto decode(const toml::value& v) -> T {
+            return toml::get<T>(v);
         }
     };
 
-    template<typename T> concept JsonSerializable = requires(const T& v, const nlohmann::json& j) {
-        { Codec<T>::encode(v) } -> std::same_as<nlohmann::json>; { Codec<T>::decode(j) } -> std::same_as<T>;
+    template<typename T> concept Serializable = requires(const T& v, const toml::value& tv) {
+        { Codec<T>::encode(v) } -> std::same_as<toml::value>; { Codec<T>::decode(tv) } -> std::same_as<T>;
     };
+
 
     template<typename T>
     class Field;
@@ -71,36 +75,37 @@ namespace stdpp::config {
     class FieldValue;
 
     /**
-    * @brief 配置字段的非模板基类
-    * FieldEntryBase 提供所有字段共享的基础能力：
-    * - 字段元信息（名称、类型）
-    * - JSON 编解码的虚接口
-    * - 多线程读写保护
-    * - 变更标记与事件分发
-    * 该类型：
-    * - 不直接存储字段值
-    * - 仅由 Config / Field / FieldValue 内部使用
-    * - 通过多态支持不同类型字段的统一管理
-    */
+     * @brief 配置字段的非模板基类
+     * FieldEntryBase 提供所有字段共享的基础能力：
+     * - 字段元信息（名称、类型）
+     * - TOML 编解码的虚接口
+     * - 多线程读写保护
+     * - 变更标记与事件分发
+     * 该类型：
+     * - 不直接存储字段值
+     * - 仅由 Config / Field / FieldValue 内部使用
+     * - 通过多态支持不同类型字段的统一管理
+     */
     struct FieldEntryBase {
         FieldEntryBase(STR name, STR type_name, const std::type_index& type) : name{std::move(name)}, type_name{std::move(type_name)}, type{type} {}
+
         virtual ~FieldEntryBase() = default;
 
         /**
-         * @brief 将字段当前值编码为 JSON
-         * @return JSON 对象
-         * @note 默认实现返回空 object
+         * @brief 将字段当前值编码为 TOML
+         * @return TOML value
+         * @note 默认实现返回空 table
          */
-        virtual auto encode() -> nlohmann::json {
-            return nlohmann::json::object();
+        virtual auto encode() -> toml::value {
+            return toml::table{};
         }
 
         /**
-         * @brief 从 JSON 解码并更新字段值
-         * @param json JSON 数据
+         * @brief 从 TOML 解码并更新字段值
+         * @param value TOML 数据
          * @note 默认实现不做任何处理
          */
-        virtual auto decode(const nlohmann::json& json) -> void {}
+        virtual auto decode(const toml::value& value) -> void {}
 
     protected:
         friend class Config;
@@ -110,7 +115,7 @@ namespace stdpp::config {
         STR type_name;
         std::type_index type;
 
-        std::shared_mutex json_mutex;
+        std::shared_mutex toml_mutex;
         std::shared_mutex value_mutex;
         std::shared_mutex event_mutex;
 
@@ -128,13 +133,13 @@ namespace stdpp::config {
      * - FieldEntryBase 的模板派生
      * 职责：
      * - 持有字段真实值
-     * - 提供线程安全的 JSON 编解码
-     * @tparam T 字段值类型，必须满足 JsonSerializable
+     * - 提供线程安全的 TOML 编解码
+     * @tparam T 字段值类型，必须满足 Serializable
      */
-    template<JsonSerializable T>
+    template<Serializable T>
     struct FieldEntry : FieldEntryBase {
-        template<typename... Args>
-        FieldEntry(STR name, const STR& type, Args&&... args) : FieldEntryBase{std::move(name), typeid(T).name(), typeid(T)}, value(std::forward<Args>(args)...) {}
+        template<typename... Args> requires std::constructible_from<T, Args...>
+        FieldEntry(STR name, const STR& type, Args&&... args) : FieldEntryBase{std::move(name), typeid(T).name(), typeid(T)}, value{std::forward<Args>(args)...} {}
 
     private:
         friend class Field<T>;
@@ -143,16 +148,16 @@ namespace stdpp::config {
 
         T value;
 
-        auto encode() -> nlohmann::json override {
+        auto encode() -> toml::value override {
             std::shared_lock _(value_mutex);
-            std::unique_lock _(json_mutex);
+            std::unique_lock _(toml_mutex);
             return Codec<T>::encode(value);
         }
 
-        auto decode(const nlohmann::json& json) -> void override {
-            std::shared_lock _(json_mutex);
+        auto decode(const toml::value& value_toml) -> void override {
+            std::shared_lock _(toml_mutex);
             std::unique_lock _(value_mutex);
-            value = Codec<T>::decode(json);
+            value = Codec<T>::decode(value_toml);
         }
     };
 
@@ -341,7 +346,7 @@ namespace stdpp::config {
         }
 
     private:
-        inline static nlohmann::json loaded_config = nlohmann::json::object();
+        inline static toml::value loaded_config = toml::table{};
         inline static bool has_loaded_config = false;
         inline static std::shared_mutex field_mutex;
         inline static std::shared_mutex config_mutex;
@@ -363,20 +368,19 @@ namespace stdpp::config {
 
         static auto load_config_from_file() -> bool {
             if (!std::filesystem::exists(path)) {
-                loaded_config = nlohmann::json::object();
+                loaded_config = toml::table{};
                 has_loaded_config = false;
                 return false;
             }
 
-            std::ifstream ifs(path);
-            if (!ifs) {
+            try {
+                loaded_config = toml::parse(path.string());
+                has_loaded_config = true;
+                return true;
+            } catch (...) {
                 has_loaded_config = false;
                 return false;
             }
-
-            ifs >> loaded_config;
-            has_loaded_config = true;
-            return true;
         }
 
         static auto save_config_to_file() -> bool {
@@ -384,21 +388,26 @@ namespace stdpp::config {
             if (!ofs) {
                 return false;
             }
-            ofs << loaded_config.dump(4);
+            ofs << toml::format(loaded_config);
             return true;
         }
 
         static auto find_config_value(const FEBP& entry) -> void {
             const auto& parts = entry->path_parts;
-            const nlohmann::json* node = &loaded_config;
+            const toml::value* node = &loaded_config;
 
             bool found = true;
             for (const auto& p : parts) {
-                if (!node->contains(p)) {
+                if (!node->is_table()) {
                     found = false;
                     break;
                 }
-                node = &(*node)[p];
+                const auto& tbl = node->as_table();
+                if (!tbl.contains(p)) {
+                    found = false;
+                    break;
+                }
+                node = &tbl.at(p);
             }
 
             if (found) {
@@ -415,17 +424,22 @@ namespace stdpp::config {
             }
 
             const auto parts = split_path(entry->name);
-            nlohmann::json* node = &loaded_config;
+            toml::value* node = &loaded_config;
 
             for (size_t i = 0; i < parts.size(); ++i) {
                 const auto& p = parts[i];
+
                 if (i + 1 == parts.size()) {
                     (*node)[p] = entry->encode();
                 } else {
-                    node = &(*node)[p];
-                    if (!node->is_object()) {
-                        *node = nlohmann::json::object();
+                    if (!node->is_table()) {
+                        *node = toml::table{};
                     }
+                    auto& tbl = node->as_table();
+                    if (!tbl.contains(p)) {
+                        tbl[p] = toml::table{};
+                    }
+                    node = &tbl[p];
                 }
             }
         }
@@ -674,6 +688,9 @@ namespace stdpp::config {
         FEP<T> value_;
     };
 
+    template<typename T> concept HasValueType = requires { typename T::value_type; };
+    template<typename T> concept InitListConstructible = HasValueType<T> && std::constructible_from<T, std::initializer_list<typename T::value_type>>;
+
     /**
      * @brief 强类型配置字段声明
      * Field 在构造时会：
@@ -706,9 +723,15 @@ namespace stdpp::config {
         * @param field_name 字段完整路径名
         * @param args 构造初始值所需参数
         */
-        template<typename... Args>
+        template<typename... Args> requires std::constructible_from<T, Args...>
         explicit Field(const STR& field_name, Args&&... args) {
             this->value_ = Config::find_or_create<T>(field_name, typeid(T).name(), std::forward<Args>(args)...);
+            init(field_name);
+        }
+
+        template<typename U = T> requires InitListConstructible<U>
+        explicit Field(const STR& field_name, std::initializer_list<typename U::value_type> il) {
+            this->value_ = Config::find_or_create<T>(field_name, typeid(T).name(), T(il));
             init(field_name);
         }
 
@@ -743,36 +766,42 @@ namespace stdpp::config {
         }
     };
 
+    template<typename T> concept NotString = !std::is_same_v<std::decay_t<T>, std::string>;
+
     template<typename C, typename T> concept HasInsert = requires(C c, T v) {
         c.insert(c.end(), v);
     };
 
+    template<typename M> concept MapLike = requires {
+        typename M::key_type; typename M::mapped_type; typename M::value_type;
+    };
+
     /**
-     * @brief STL 风格顺序容器的 JSON 编解码特化
+     * @brief STL 风格顺序容器的 TOML 编解码特化
      * 支持：
      * - vector / list / deque 等
      * - 要求容器支持 insert(end(), value)
-     * JSON 表示为数组。
+     * TOML 表示为数组。
      * @tparam C 容器模板
      * @tparam T 元素类型
      */
-    template<template<class...> class C, typename T, typename... Args> requires HasInsert<C<T, Args...>, T>
+    template<template<class...> class C, typename T, typename... Args> requires HasInsert<C<T, Args...>, T> && (!MapLike<C<T, Args...>>) && NotString<C<T, Args...>>
     struct Codec<C<T, Args...>> {
-        static auto encode(const C<T, Args...>& c) -> nlohmann::json {
-            nlohmann::json j = nlohmann::json::array();
+        static auto encode(const C<T, Args...>& c) -> toml::value {
+            toml::array arr;
             for (const auto& e : c) {
-                j.push_back(Codec<T>::encode(e));
+                arr.push_back(Codec<T>::encode(e));
             }
-            return j;
+            return arr;
         }
 
-        static auto decode(const nlohmann::json& j) -> C<T, Args...> {
-            if (!j.is_array()) {
-                throw std::runtime_error("Container decode failed: json is not array");
+        static auto decode(const toml::value& v) -> C<T, Args...> {
+            if (!v.is_array()) {
+                throw std::runtime_error("Container decode failed: toml is not array");
             }
 
             C<T, Args...> c;
-            for (const auto& e : j) {
+            for (const auto& e : v.as_array()) {
                 c.insert(c.end(), Codec<T>::decode(e));
             }
             return c;
@@ -780,15 +809,279 @@ namespace stdpp::config {
     };
 
     /**
-     * @brief 枚举类型的 JSON 编解码特化
+     * @brief 二元组(pair)的 TOML 编解码特化
+     * 支持：
+     * - std::pair<T1, T2>
+     * TOML 表示为长度为 2 的数组：[first, second]。
+     * @tparam T1 第一个元素类型
+     * @tparam T2 第二个元素类型
+     */
+    template<typename T1, typename T2>
+    struct Codec<std::pair<T1, T2>> {
+        static auto encode(const std::pair<T1, T2>& p) -> toml::value {
+            toml::array arr;
+            arr.push_back(Codec<T1>::encode(p.first));
+            arr.push_back(Codec<T2>::encode(p.second));
+            return arr;
+        }
+
+        static auto decode(const toml::value& v) -> std::pair<T1, T2> {
+            if (!v.is_array() || v.as_array().size() != 2) {
+                throw std::runtime_error("pair decode failed: toml is not [2]");
+            }
+            const auto& a = v.as_array();
+            return {Codec<T1>::decode(a[0]), Codec<T2>::decode(a[1])};
+        }
+    };
+
+    /**
+     * @brief STL 风格关联映射容器(map-like)的 TOML 编解码特化
+     * 支持：
+     * - std::map
+     * - std::unordered_map
+     * - std::multimap
+     * 要求：
+     * - 容器元素语义等价于 pair<key, value>
+     * - 支持 emplace(key, value)
+     * TOML 表示为 pair 的数组：
+     *   [ [key1, value1], [key2, value2], ... ]
+     * @tparam M 映射容器类型
+     */
+    template<MapLike M>
+    struct Codec<M> {
+        using K = M::key_type;
+        using V = M::mapped_type;
+        using P = std::pair<K, V>;
+
+        static auto encode(const M& m) -> toml::value {
+            toml::array arr;
+            for (auto& [k, v] : m) {
+                arr.push_back(Codec<P>::encode({k, v}));
+            }
+            return arr;
+        }
+
+        static auto decode(const toml::value& v) -> M {
+            if (!v.is_array()) {
+                throw std::runtime_error("map decode failed: toml is not array");
+            }
+
+            M m;
+            for (auto& e : v.as_array()) {
+                auto [k, val] = Codec<P>::decode(e);
+                m.emplace(std::move(k), std::move(val));
+            }
+            return m;
+        }
+    };
+
+    /**
+     * @brief STL 定长顺序容器(std::array)的 TOML 编解码特化
+     * 支持：
+     * - std::array<T, N>
+     * 要求：
+     * - TOML 数组长度必须等于 N
+     * TOML 表示为数组。
+     * @tparam T 元素类型
+     * @tparam N 编译期长度
+     */
+    template<typename T, std::size_t N>
+    struct Codec<std::array<T, N>> {
+        static auto encode(const std::array<T, N>& a) -> toml::value {
+            toml::array arr;
+            for (const auto& e : a) {
+                arr.push_back(Codec<T>::encode(e));
+            }
+            return arr;
+        }
+
+        static auto decode(const toml::value& v) -> std::array<T, N> {
+            if (!v.is_array()) {
+                throw std::runtime_error("array decode failed: toml is not array");
+            }
+            if (v.as_array().size() != N) {
+                throw std::runtime_error("array decode failed: size mismatch");
+            }
+
+            std::array<T, N> a{};
+            for (std::size_t i = 0; i < N; ++i) {
+                a[i] = Codec<T>::decode(v.as_array()[i]);
+            }
+            return a;
+        }
+    };
+
+    /**
+     * @brief 元组(tuple)的 TOML 编解码特化
+     * 支持：
+     * - std::tuple<Ts...>
+     * TOML 表示为按顺序排列的数组：
+     *   [e0, e1, e2, ...]
+     * @tparam Ts 元素类型参数包
+     */
+    template<typename... Ts>
+    struct Codec<std::tuple<Ts...>> {
+        static auto encode(const std::tuple<Ts...>& t) -> toml::value {
+            toml::array arr;
+            encode_impl(arr, t, std::index_sequence_for<Ts...>{});
+            return arr;
+        }
+
+        static auto decode(const toml::value& v) -> std::tuple<Ts...> {
+            if (!v.is_array() || v.as_array().size() != sizeof...(Ts)) {
+                throw std::runtime_error("tuple decode failed: size mismatch");
+            }
+            return decode_impl(v.as_array(), std::index_sequence_for<Ts...>{});
+        }
+
+    private:
+        template<std::size_t... I>
+        static auto encode_impl(toml::array& arr, const std::tuple<Ts...>& t, std::index_sequence<I...>) -> void {
+            (arr.push_back(Codec<std::tuple_element_t<I, std::tuple<Ts...>>>::encode(std::get<I>(t))), ...);
+        }
+
+        template<std::size_t... I>
+        static auto decode_impl(const toml::array& arr, std::index_sequence<I...>) -> std::tuple<Ts...> {
+            return {Codec<std::tuple_element_t<I, std::tuple<Ts...>>>::decode(arr[I])...};
+        }
+    };
+
+    /**
+     * @brief 可选值(optional)的 TOML 编解码特化
+     * 支持：
+     * - std::optional<T>
+     * TOML 表示为 table：
+     * - 无值：{ has = false }
+     * - 有值：{ has = true, value = T }
+     * @tparam T 元素类型
+     */
+    template<typename T>
+    struct Codec<std::optional<T>> {
+        static auto encode(const std::optional<T>& o) -> toml::value {
+            toml::table tbl;
+            if (!o) {
+                tbl["has"] = false;
+            } else {
+                tbl["has"] = true;
+                tbl["value"] = Codec<T>::encode(*o);
+            }
+            return tbl;
+        }
+
+        static auto decode(const toml::value& v) -> std::optional<T> {
+            if (!v.is_table()) {
+                throw std::runtime_error("optional decode failed: toml is not table");
+            }
+            const auto& tbl = v.as_table();
+            if (!tbl.contains("has")) {
+                throw std::runtime_error("optional decode failed: missing 'has'");
+            }
+
+            const bool has = toml::get<bool>(tbl.at("has"));
+            if (!has) {
+                return std::nullopt;
+            }
+
+            if (!tbl.contains("value")) {
+                throw std::runtime_error("optional decode failed: missing 'value'");
+            }
+            return Codec<T>::decode(tbl.at("value"));
+        }
+    };
+
+
+    /**
+     * @brief 变体类型(variant)的 TOML 编解码特化
+     * 支持：
+     * - std::variant<Ts...>
+     * TOML 表示为对象：
+     *   { index = i, value = v }
+     * @tparam Ts 可选类型参数包
+     */
+    template<typename... Ts>
+    struct Codec<std::variant<Ts...>> {
+        static auto encode(const std::variant<Ts...>& v) -> toml::value {
+            toml::table tbl;
+            tbl["index"] = static_cast<int64_t>(v.index());
+            tbl["value"] = std::visit([]<typename T0>(T0&& arg) {
+                                          using T = std::decay_t<T0>;
+                                          return Codec<T>::encode(arg);
+                                      },
+                                      v);
+            return tbl;
+        }
+
+        static auto decode(const toml::value& v) -> std::variant<Ts...> {
+            if (!v.is_table() || !v.as_table().contains("index") || !v.as_table().contains("value")) {
+                throw std::runtime_error("variant decode failed: invalid toml table");
+            }
+
+            const auto& tbl = v.as_table();
+            std::size_t index = toml::get<std::size_t>(tbl.at("index"));
+            return decode_impl(index, tbl.at("value"), std::index_sequence_for<Ts...>{});
+        }
+
+    private:
+        template<std::size_t... I>
+        static auto decode_impl(std::size_t index, const toml::value& value, std::index_sequence<I...>) -> std::variant<Ts...> {
+            std::variant<Ts...> v;
+            const bool matched = ((index == I ? (v = Codec<std::tuple_element_t<I, std::tuple<Ts...>>>::decode(value), true) : false) || ...);
+            if (!matched) {
+                throw std::runtime_error("variant decode failed: index out of range");
+            }
+            return v;
+        }
+    };
+
+    /**
+     * @brief 时分秒结构(std::chrono::hh_mm_ss)的 TOML 编解码特化
+     * 支持：
+     * - std::chrono::hh_mm_ss<Duration>
+     * TOML 表示为对象：
+     *   { hh = hour, mm = minute, ss = second, sub = subsecond }
+     * @tparam Duration 底层时间精度类型
+     */
+    template<typename Duration>
+    struct Codec<std::chrono::hh_mm_ss<Duration>> {
+        using HMS = std::chrono::hh_mm_ss<Duration>;
+
+        static auto encode(const HMS& t) -> toml::value {
+            toml::table tbl;
+            tbl["hh"] = t.hours().count();
+            tbl["mm"] = t.minutes().count();
+            tbl["ss"] = t.seconds().count();
+            tbl["sub"] = t.subseconds().count();
+            return tbl;
+        }
+
+        static auto decode(const toml::value& v) -> HMS {
+            if (!v.is_table()) {
+                throw std::runtime_error("hh_mm_ss decode failed: toml is not table");
+            }
+            const auto& tbl = v.as_table();
+            if (!tbl.contains("hh") || !tbl.contains("mm") || !tbl.contains("ss") || !tbl.contains("sub")) {
+                throw std::runtime_error("hh_mm_ss decode failed: missing field");
+            }
+
+            const auto h = std::chrono::hours(toml::get<int64_t>(tbl.at("hh")));
+            const auto m = std::chrono::minutes(toml::get<int64_t>(tbl.at("mm")));
+            const auto s = std::chrono::seconds(toml::get<int64_t>(tbl.at("ss")));
+            auto sub = Duration(toml::get<typename Duration::rep>(tbl.at("sub")));
+
+            return HMS{h + m + s + sub};
+        }
+    };
+
+    /**
+     * @brief 枚举类型的 TOML 编解码特化
      * 使用 magic_enum：
-     * - JSON 中存储枚举名字符串
+     * - TOML 中存储枚举名字符串
      * - 解码时根据字符串反射枚举值
      * @tparam E 枚举类型
      */
     template<typename E> requires std::is_enum_v<E>
     struct Codec<E> {
-        static auto encode(E v) -> nlohmann::json {
+        static auto encode(E v) -> toml::value {
             auto name = magic_enum::enum_name(v);
             if (name.empty()) {
                 throw std::runtime_error("Enum encode failed: unknown value");
@@ -796,12 +1089,12 @@ namespace stdpp::config {
             return std::string{name};
         }
 
-        static auto decode(const nlohmann::json& j) -> E {
-            if (!j.is_string()) {
-                throw std::runtime_error("Enum decode failed: json is not string");
+        static auto decode(const toml::value& v) -> E {
+            if (!v.is_string()) {
+                throw std::runtime_error("Enum decode failed: toml is not string");
             }
 
-            const auto str = j.get<std::string>();
+            const auto str = toml::get<std::string>(v);
             if (auto opt = magic_enum::enum_cast<E>(str)) {
                 return *opt;
             }
@@ -809,7 +1102,6 @@ namespace stdpp::config {
             throw std::runtime_error("Enum decode failed: invalid enum name: " + str);
         }
     };
-
 
     template<typename T>
     auto operator<=>(const FieldValue<T>& lhs, const FieldValue<T>& rhs) requires requires(const T& a, const T& b) { a <=> b; } {
