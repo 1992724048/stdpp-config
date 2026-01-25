@@ -1,43 +1,29 @@
 # stdpp::config
 
-A **type-safe, event-driven, thread-safe** C++ configuration system with JSON persistence.
-It supports load/save, hierarchical path mapping, enum and container serialization, and configuration change notifications.
-
-The core design philosophy is **“configuration as variables”**:
-configuration entries are represented as strongly typed objects in code. Reading and writing them directly manipulates configuration values, changes can be observed via events, and persistence is handled centrally.
+A **type-safe, event-driven, thread-safe** C++ configuration system with TOML persistence.  
+It treats configuration as **strongly typed variables**, supports rich STL and chrono types, provides change events, and allows full customization via `Codec<T>`.
 
 ---
 
 ## Features
 
-* **Strongly typed configuration fields**
-
-  * `Field<T>` / `FieldValue<T>` provide type-safe access
-  * Compile-time constraints for JSON-serializable types
-* **Automatic JSON mapping**
-
-  * Uses `::` to represent hierarchical paths (e.g. `net::http::port`)
-  * Automatically creates and merges JSON object structures
+* **Strongly typed fields**
+  * `Field<T>` / `FieldValue<T>` behave like normal variables
+  * Compile-time constraint: `Serializable`
+* **Automatic TOML mapping**
+  * Hierarchical paths via `::` (e.g. `net::http::port`)
+  * Automatically builds nested TOML tables
 * **Event-driven**
-
-  * Supports configuration load events and value change events
-  * Low-overhead event system (`stdpp::event`)
+  * `VALUE_LOAD` when loaded from file
+  * `VALUE_CHANG` when modified at runtime
 * **Thread-safe**
-
-  * Separate read/write locks for value, JSON, and event handling
-  * Safe for concurrent access and modification
+  * Separate locks for value / TOML / events
 * **Extensible serialization**
-
-  * Custom types supported via `Codec<T>`
-  * Built-in support for:
-
-    * Fundamental types
-    * STL containers
-    * Enums (via `magic_enum`)
-* **Explicit dirty marking & batch saving**
-
-  * Modifications do not immediately write to disk
-  * `Config::save()` persists all changes at once
+  * Built-in support for many STL, chrono, and utility types
+  * User-defined types via `Codec<T>`
+* **Batch save**
+  * Changes are marked dirty
+  * `Config::save()` persists all modified fields at once
 
 ---
 
@@ -49,293 +35,173 @@ configuration entries are represented as strongly typed objects in code. Reading
 * [stdpp-event](https://github.com/1992724048/stdpp-event)
 
 ---
-
-## Quick Start
-
-### Define configuration fields
-
+## Field Identity & Default Value Rules
 ```cpp
 #include "config.h"
-
 using namespace stdpp::config;
-
-Field<int> port("server::port");
-Field<int> port2("server::port", 255);
-Field<int> port3("port", 255);
+Field<int> a("x");
+Field<int> b("x", 255);
+Field<int> c("x::y", 5);
 ```
-
-#### Field identity and default value rules
-
 * Fields are uniquely identified by their **full path string**
-* Fields with the same **name and type** share the **same underlying storage**
-* The **first constructed field** determines the initial default value
-* Subsequent fields with the same name **do not override** the existing value
+* Fields with the same **name and type** share the same storage
+* The **first constructed field** decides the default value
+* Later declarations with the same name:
+  * Same type → reuse existing value, ignore default
+  * Different type → throws exception
 
-| Field | Path           | Shared | Default Used |
-| ----- | -------------- | ------ | ------------ |
-| port  | `server::port` | yes    | `int{}`      |
-| port2 | `server::port` | yes    | ignored      |
-| port3 | `port`         | no     | `255`        |
-
-Declaring the same name with a **different type** will throw an exception.
-
----
-
-### Load configuration file
-
-```cpp
-Config::load("config.json");
-```
-
-* If a field exists in JSON → its value overrides the default
-* If it does not exist → the constructor default is retained
-* Successfully loaded fields emit a `VALUE_LOAD` event
+| Declaration | Path           | Shared | Default Used |
+|-------------|----------------|--------|--------------|
+| `Field<int> a("x")`        | `x`            | yes | `int{}` |
+| `Field<int> b("x", 255)`     | `x`            | yes | ignored |
+| `Field<int> c("x::y", 5)`     | `x::y`            | no  | `5`     |
 
 ---
 
-### Read and write values
+## Operator Overload Support
 
-```cpp
-int p = *port;   // read
-port2 = 8080;    // write
-port2 += 1;      // arithmetic operators supported
-```
+`FieldValue<T>` behaves like `T` if `T` supports the operator.
 
-All write operations:
+### Assignment
+* `=`
+* assign from `T`
+* assign from `FieldValue<T>`
 
-* Update the value
-* Mark the configuration as dirty
-* Emit the `VALUE_CHANG` event
+### Arithmetic
+* `+  -  *  /`
+* `+= -= *= /=`
 
----
+### Bitwise
+* `|  &  ^`
+* `|= &= ^=`
 
-### Runtime field enumeration (type-based)
+### Shift
+* `<< >>`
+* `<<= >>=`
 
-All declared fields of a given type can be enumerated at runtime:
+### Increment / Decrement
+* `++x  x++`
+* `--x  x--`
 
-```cpp
-for (const auto& field : Field<int>::get()) {
-    auto value = FieldValue<int>::form_entry(field);
-    std::cout << value.name()
-              << " (" << value.type_name() << ")"
-              << " ptr=" << value.ptr()
-              << std::endl;
-}
-```
+### Callable
+* `operator()` for function-like types
 
-This enables **lightweight runtime introspection**, useful for:
+### Mixed with raw values
+* `i = field + 1`
+* `i += field`
+* `field += other_field`
 
-* Debugging
-* Diagnostics
-* Configuration editors
-* Tooling and visualization
+> All operators are only enabled if the underlying `T` supports them.
 
 ---
 
-### Save configuration
+## Supported Containers and Types
+
+### Sequential Containers
+* `std::vector<T>`
+* `std::list<T>`
+* `std::deque<T>`
+* `std::forward_list<T>`
+* `std::array<T, N>`
+
+### Container Adapters
+* `std::queue<T>`
+* `std::stack<T>`
+* `std::priority_queue<T>`
+
+### Associative Containers
+* `std::set<T>`
+* `std::multiset<T>`
+* `std::map<K, V>`
+* `std::multimap<K, V>`
+* `std::unordered_map<K, V>`
+
+### Utility Types
+* `std::pair<T1, T2>`
+* `std::tuple<Ts...>`
+* `std::optional<T>`
+* `std::variant<Ts...>`
+* `std::expected<T, E>`
+* `std::complex<T>`
+* `std::bitset<N>`
+* `std::filesystem::path`
+* `std::atomic<T>`
+
+### Time & Date (std::chrono)
+* `std::chrono::duration`
+* `std::chrono::hh_mm_ss`
+* `std::chrono::sys_time`
+* `std::chrono::year_month_day`
+* `std::chrono::zoned_time`
+
+### Pointer Wrappers
+* `std::unique_ptr<T>`
+* `std::shared_ptr<T>`
+
+### Enums
+* Any `enum` or `enum class`  
+  Serialized as **string names** via `magic_enum`
+
+---
+
+## Example
 
 ```cpp
-Config::save();
-```
+Field<int> port("server::port", 8080);
+Field<std::vector<int>> vec("test::vec", {1,2,3});
+Field<std::optional<int>> opt("test::opt", std::nullopt);
+Field<Test> mode("app::mode", Test::A);
+````
 
-* Writes to disk only if changes exist
-* Automatically rebuilds the JSON hierarchy
-* Outputs formatted JSON (`indent = 4`)
-* Creates the file if it does not exist
+TOML:
+
+```toml
+[server]
+port = 8080
+
+[test]
+vec = [1,2,3]
+opt = { has = false }
+
+[app]
+mode = "A"
+```
 
 ---
 
 ## Configuration Events
 
-### Listening for changes
-
 ```cpp
-auto handle = port.add_event(
-    [](const stdpp::config::FEBP& entry, Event ev) {
-        if (ev == Event::VALUE_CHANG) {
-            // value changed
-        }
-    }
-);
+auto h = port.add_event([](auto&, Event ev){
+    if(ev == Event::VALUE_CHANG) { /* changed */ }
+});
 ```
 
-### Event types
+Event types:
 
 ```cpp
 enum class Event {
-    VALUE_CHANG,  // value modified
-    VALUE_LOAD    // value loaded from file
+    VALUE_CHANG,
+    VALUE_LOAD
 };
-```
-
-### Removing an event
-
-```cpp
-port.remove_event(handle.value());
-```
-
----
-
-## STL Container Support
-
-```cpp
-Field<std::vector<int>> ports("net::ports", {80, 443});
-```
-
-JSON representation:
-
-```json
-{
-  "net": {
-    "ports": [80, 443]
-  }
-}
-```
-
-All containers matching the following form are supported:
-
-```cpp
-template<typename C, typename T> concept HasInsert = requires(C c, T v) {
-    c.insert(c.end(), v);
-};
-
-template<template<class...> class C, typename T, typename... Args> requires HasInsert<C<T, Args...>, T>
-```
-
-Examples include `std::vector`, `std::list`, `std::set` (must support `insert`).
-
----
-
-## Enum Support
-
-Enum types are supported out of the box and are serialized as **string names**.
-
-```cpp
-enum class Mode {
-    Debug,
-    Release
-};
-
-Field<Mode> mode("app::mode", Mode::Debug);
-```
-
-JSON representation:
-
-```json
-{
-  "app": {
-    "mode": "Debug"
-  }
-}
-```
-
-### Behavior
-
-* Enums are encoded as their **identifier names**
-* Decoding uses `magic_enum::enum_cast`
-* Invalid or unknown enum strings will throw an exception
-* Enum fields fully support:
-
-  * Default values
-  * Events (`VALUE_LOAD`, `VALUE_CHANG`)
-  * Dirty tracking and persistence
-  * Runtime enumeration via `Field<Enum>::get()`
-
-Enum containers (e.g. `std::vector<Enum>`) are automatically supported via the generic container codec and are serialized as JSON arrays of strings.
-
----
-
-## Operator Support
-
-`FieldValue<T>` are designed to behave **like ordinary variables**.
-For numeric and bitwise-capable types, a comprehensive set of operators is provided.
-
-> **Requirement**
-> All operators are only available if the underlying type `T` itself supports the corresponding C++ operator (`+ - * / | & ^`, etc.).
-
-``` c++
-    Field<std::function<int(int)>> port0("test");
-    Field<int> port("server::port");
-    Field<int> port2("server::port", 255);
-
-    int i{ 0 };
-
-    port |= 1;
-    port ^= 1;
-    port &= 1;
-    port -= 1;
-    port += 1;
-    port *= 1;
-    port /= 1;
-    port = 1;
-    port = port;
-    port = port2;
-    port += port2;
-    port -= port2;
-    port *= port2;
-    port /= port2;
-    port |= port2;
-    port ^= port2;
-    port &= port2;
-    port2 = port;
-    i = i + port;
-    i = i - port;
-    i = i * port;
-    i = i / port;
-    i = i | port;
-    i = i ^ port;
-    i = i & port;
-    i = port + 1;
-    i = port - 1;
-    i = port * 1;
-    i = port / 1;
-    i = port | 1;
-    i = port ^ 1;
-    i = port & 1;
-    i += port;
-    i -= port;
-    i *= port;
-    i /= port;
-    i |= port;
-    i ^= port;
-    i &= port;
-    port >> 1;
-    port << 1;
-    port >>= 1;
-    port <<= 1;
-
-    --port;
-    ++port;
-    port--;
-    port++;
-
-    port0 = [](const int a) {
-        return a;
-    };
-
-    port0(1);
 ```
 
 ---
 
 ## Custom Type Serialization
 
-To support a custom type, specialize `Codec<T>`:
+Define a `Codec<T>` specialization:
 
 ```cpp
-struct Point {
-    int x;
-    int y;
-};
+struct Point { int x; int y; };
 
 template<>
-struct stdpp::config::Codec<Point> {
-    static nlohmann::json encode(const Point& p) {
-        return {{"x", p.x}, {"y", p.y}};
+struct Codec<Point> {
+    static toml::value encode(const Point& p) {
+        return { {"x", p.x}, {"y", p.y} };
     }
-
-    static Point decode(const nlohmann::json& j) {
-        return { j.at("x"), j.at("y") };
+    static Point decode(const toml::value& v) {
+        return { v.at("x"), v.at("y") };
     }
 };
 ```
@@ -343,38 +209,31 @@ struct stdpp::config::Codec<Point> {
 Usage:
 
 ```cpp
-Field<Point> pos("window::pos", {100, 200});
+Field<Point> pos("window::pos", {10,20});
 ```
 
 ---
 
 ## Thread Safety
 
-* Each configuration entry internally maintains:
+Each field internally has:
 
-  * `value_mutex` – protects the value
-  * `json_mutex` – protects serialization
-  * `event_mutex` – protects event handlers
-* Concurrent reads are supported
-* Writes are synchronized and automatically trigger events
+* `value_mutex` – protects value
+* `toml_mutex` – protects encode/decode
+* `event_mutex` – protects callbacks
 
-Manual locking is also available:
+Manual lock:
 
 ```cpp
-auto lock = port.write_lock();
-// safely modify the value
+auto lock = field.write_lock();
+// modify safely
 ```
 
 ---
 
-## Design Notes & Limitations
+## Design Notes
 
-* All fields are managed via a **global static `Config`**
-* Field names (paths) must be unique
-* Type mismatches for the same name will throw exceptions
+* Global static `Config`
 * Fields cannot be removed at runtime
-* Configuration files are not created automatically on load
-  (the first successful `save()` will create the file)
-
----
-
+* Type mismatch on same name throws exception
+* File is created only on first successful `save()`
