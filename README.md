@@ -148,9 +148,21 @@ Field<int> c("x::y", 5);
 
 ```cpp
 Field<int> port("server::port", 8080);
+Field<int> port2("server::port", 8080);
+// port == port2
+
 Field<std::vector<int>> vec("test::vec", {1,2,3});
+
+Config::load("config.toml");
+
 Field<std::optional<int>> opt("test::opt", std::nullopt);
 Field<Test> mode("app::mode", Test::A);
+
+mode.chang();
+opt = std::nullopt; // opt.change();
+
+Config::save(); // change only
+
 ````
 
 TOML:
@@ -161,7 +173,10 @@ port = 8080
 
 [test]
 vec = [1,2,3]
-opt = { has = false }
+
+[test.opt]
+has = false
+// value = 114
 
 [app]
 mode = "A"
