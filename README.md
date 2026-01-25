@@ -158,7 +158,7 @@ Config::load("config.toml");
 Field<std::optional<int>> opt("test::opt", std::nullopt);
 Field<Test> mode("app::mode", Test::A);
 
-mode.chang();
+mode.change();
 opt = std::nullopt; // opt.change();
 
 Config::save(); // change only
