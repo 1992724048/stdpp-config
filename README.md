@@ -30,7 +30,7 @@ It treats configuration as **strongly typed variables**, supports rich STL and c
 ## Dependencies
 
 * C++20
-* [nlohmann/json](https://github.com/nlohmann/json) ≥ 3.12.0
+* [ToruNiina/toml11](https://github.com/ToruNiina/toml11) ≥ 4.4.0
 * [Neargye/magic_enum](https://github.com/Neargye/magic_enum) ≥ 0.9.7
 * [stdpp-event](https://github.com/1992724048/stdpp-event)
 
