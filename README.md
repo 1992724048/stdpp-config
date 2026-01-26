@@ -148,7 +148,7 @@ Field<int> c("x::y", 5);
 
 ```cpp
 Field<int> port("server::port", 8080);
-Field<int> port2("server::port", 8080);
+Field<int> port2("server::port", 8080); // Ignore 8080 Parameter
 // port == port2
 
 Field<std::vector<int>> vec("test::vec", {1,2,3});
