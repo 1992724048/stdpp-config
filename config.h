@@ -1,32 +1,40 @@
-﻿#pragma once
+﻿// 遂沫 config.h
+// 2026-02-18 17:18:01
+
+#pragma once
 
 // https://github.com/1992724048/stdpp-config
 // 1.2.0
 
-#include <unordered_map>
+#include <any>
+#include <array>
+#include <atomic>
+#include <bitset>
+#include <chrono>
+#include <complex>
+#include <expected>
+#include <filesystem>
+#include <fstream>
+#include <memory>
+#include <optional>
+#include <ranges>
+#include <shared_mutex>
+#include <stack>
 #include <string>
 #include <string_view>
-#include <memory>
-#include <vector>
-#include <fstream>
-#include <typeinfo>
-#include <atomic>
-#include <filesystem>
-#include <expected>
-#include <ranges>
 #include <type_traits>
-#include <shared_mutex>
-#include <array>
-#include <optional>
+#include <typeinfo>
+#include <unordered_map>
 #include <variant>
-#include <chrono>
-#include <any>
+#include <vector>
 
 // ToruNiina/toml11 4.4.0
 #include "toml11/toml.hpp"
 // Neargye/magic_enum 0.9.7
 #include "magic_enum/magic_enum.hpp"
 // 1992724048/stdpp-event 1.0.2
+#include <typeindex>
+
 #include "stdpp/event.h"
 
 namespace stdpp::config {
@@ -141,7 +149,7 @@ namespace stdpp::config {
      * @tparam T 字段值类型，必须满足 Serializable
      */
     template<Serializable T>
-    struct FieldEntry : FieldEntryBase {
+    struct FieldEntry final : FieldEntryBase {
         template<typename... Args> requires std::constructible_from<T, Args...>
         FieldEntry(STR name, const STR& type, Args&&... args) : FieldEntryBase{std::move(name), typeid(T).name(), typeid(T)}, value{std::forward<Args>(args)...} {}
 
