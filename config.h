@@ -1,12 +1,11 @@
-﻿// 遂沫 config.h
-// 2026-02-18 17:18:01
+// 遂沫 config.h
+// 2026-03-18 22:31:26
 
 #pragma once
 
 // https://github.com/1992724048/stdpp-config
-// 1.2.1
+// 1.2.2
 
-#include <any>
 #include <array>
 #include <atomic>
 #include <bitset>
@@ -27,14 +26,13 @@
 #include <unordered_map>
 #include <variant>
 #include <vector>
+#include <typeindex>
 
 // ToruNiina/toml11 4.4.0
 #include "toml11/toml.hpp"
 // Neargye/magic_enum 0.9.7
 #include "magic_enum/magic_enum.hpp"
-// 1992724048/stdpp-event 1.0.2
-#include <typeindex>
-
+// 1992724048/stdpp-event 1.0.3
 #include "stdpp/event.h"
 
 namespace stdpp::config {
@@ -99,7 +97,9 @@ namespace stdpp::config {
      * - 通过多态支持不同类型字段的统一管理
      */
     struct FieldEntryBase {
-        FieldEntryBase(STR name, STR type_name, const std::type_index& type) : name{std::move(name)}, type_name{std::move(type_name)}, type{type} {}
+        FieldEntryBase(STR name, STR type_name, const std::type_index& type) : name{std::move(name)},
+                                                                               type_name{std::move(type_name)},
+                                                                               type{type} {}
 
         virtual ~FieldEntryBase() = default;
 
@@ -118,7 +118,6 @@ namespace stdpp::config {
          * @note 默认实现不做任何处理
          */
         virtual auto decode(const toml::value& value) -> void {}
-
     protected:
         friend class Config;
         friend class FieldValueMutex;
@@ -151,8 +150,8 @@ namespace stdpp::config {
     template<Serializable T>
     struct FieldEntry final : FieldEntryBase {
         template<typename... Args> requires std::constructible_from<T, Args...>
-        FieldEntry(STR name, const STR& type, Args&&... args) : FieldEntryBase{std::move(name), typeid(T).name(), typeid(T)}, value{std::forward<Args>(args)...} {}
-
+        FieldEntry(STR name, const STR& type, Args&&... args) : FieldEntryBase{std::move(name), typeid(T).name(), typeid(T)},
+                                                                value{std::forward<Args>(args)...} {}
     private:
         friend class Field<T>;
         friend class FieldValue<T>;
@@ -271,7 +270,6 @@ namespace stdpp::config {
                 return true;
             }
 
-
             if (path.empty()) {
                 return false;
             }
@@ -361,6 +359,9 @@ namespace stdpp::config {
             return std::nullopt;
         }
 
+        static auto config_path() -> std::filesystem::path {
+            return path;
+        }
     private:
         inline static toml::value loaded_config = toml::table{};
         inline static bool has_loaded_config = false;
@@ -383,7 +384,7 @@ namespace stdpp::config {
         }
 
         static auto load_config_from_file() -> bool {
-            if (!std::filesystem::exists(path)) {
+            if (!exists(path)) {
                 loaded_config = toml::table{};
                 has_loaded_config = false;
                 return false;
@@ -404,7 +405,7 @@ namespace stdpp::config {
             if (!ofs) {
                 return false;
             }
-            ofs << toml::format(loaded_config);
+            ofs << format(loaded_config);
             return true;
         }
 
@@ -479,14 +480,14 @@ namespace stdpp::config {
          * @param entry 字段实体
          * @param mode 锁模式（读 / 写）
          */
-        FieldValueMutex(FEBP entry, const LockMode mode) : entry_(std::move(entry)), mode_(mode) {
+        FieldValueMutex(FEBP entry, const LockMode mode) : entry_(std::move(entry)),
+                                                           mode_(mode) {
             if (mode_ == LockMode::Write) {
                 write_lock_.emplace(entry_->value_mutex);
             } else {
                 read_lock_.emplace(entry_->value_mutex);
             }
         }
-
     private:
         FEBP entry_;
         LockMode mode_;
@@ -546,7 +547,7 @@ namespace stdpp::config {
          * @return 当前对象
          */
         auto operator=(const T& rhs) -> FieldValue& {
-            std::unique_lock lock(value_->value_mutex);
+            std::unique_lock _(value_->value_mutex);
             value() = rhs;
             chang();
             return *this;
@@ -561,35 +562,35 @@ namespace stdpp::config {
             if (rhs.value_ == value_) {
                 return *this;
             }
-            std::unique_lock lock(value_->value_mutex);
+            std::unique_lock _(value_->value_mutex);
             value() = rhs.value();
             chang();
             return *this;
         }
 
         auto operator++() -> FieldValue& {
-            std::unique_lock lock(value_->value_mutex);
+            std::unique_lock _(value_->value_mutex);
             ++value();
             chang();
             return *this;
         }
 
         auto operator--() -> FieldValue& {
-            std::unique_lock lock(value_->value_mutex);
+            std::unique_lock _(value_->value_mutex);
             --value();
             chang();
             return *this;
         }
 
         auto operator++(int) -> FieldValue& {
-            std::unique_lock lock(value_->value_mutex);
+            std::unique_lock _(value_->value_mutex);
             ++value();
             chang();
             return *this;
         }
 
         auto operator--(int) -> FieldValue& {
-            std::unique_lock lock(value_->value_mutex);
+            std::unique_lock _(value_->value_mutex);
             --value();
             chang();
             return *this;
@@ -597,9 +598,13 @@ namespace stdpp::config {
 
         template<typename... Args>
         decltype(auto) operator()(Args&&... args) {
-            std::unique_lock lock(value_->value_mutex);
+            std::unique_lock _(value_->value_mutex);
             chang();
             return value()(std::forward<Args>(args)...);
+        }
+
+        explicit operator bool() {
+            return value_->value;
         }
 
         /**
@@ -643,7 +648,6 @@ namespace stdpp::config {
 
         /**
          * @brief 获取字段值的写锁
-         *
          * @note 写锁析构后不会自动触发 chang()
          */
         [[nodiscard]] auto write_lock() -> FieldValueMutex {
@@ -652,10 +656,15 @@ namespace stdpp::config {
 
         /**
          * @brief 主动标记字段发生变更并触发事件
+         * @param has_mutex 是否拥有锁
          */
-        auto chang() -> void {
+        auto chang(const bool has_mutex = false) -> void {
             value_->is_chang = true;
             Config::mark_dirty();
+            if (has_mutex) {
+                value_->events(value_, Event::VALUE_CHANG);
+                return;
+            }
             std::shared_lock _(value_->event_mutex);
             value_->events(value_, Event::VALUE_CHANG);
         }
@@ -699,7 +708,6 @@ namespace stdpp::config {
         auto remove_event(const event::FastEvent<void, const FEBP&, const Event>::Handle handle) -> void {
             return Config::remove_event(value_, handle);
         }
-
     protected:
         FEP<T> value_;
     };
@@ -765,7 +773,6 @@ namespace stdpp::config {
             }
             return v;
         }
-
     private:
         inline static std::shared_mutex mutex;
         inline static MAP<STR, FEP<T>> fields;
@@ -1106,7 +1113,6 @@ namespace stdpp::config {
             }
             return decode_impl(v.as_array(), std::index_sequence_for<Ts...>{});
         }
-
     private:
         template<std::size_t... I>
         static auto encode_impl(toml::array& arr, const std::tuple<Ts...>& t, std::index_sequence<I...>) -> void {
@@ -1161,7 +1167,6 @@ namespace stdpp::config {
         }
     };
 
-
     /**
      * @brief 变体类型(variant)的 TOML 编解码特化
      * 支持：
@@ -1192,7 +1197,6 @@ namespace stdpp::config {
             std::size_t index = toml::get<std::size_t>(tbl.at("index"));
             return decode_impl(index, tbl.at("value"), std::index_sequence_for<Ts...>{});
         }
-
     private:
         template<std::size_t... I>
         static auto decode_impl(std::size_t index, const toml::value& value, std::index_sequence<I...>) -> std::variant<Ts...> {
@@ -1370,7 +1374,6 @@ namespace stdpp::config {
 
             return D{toml::get<Rep>(t.at("count"))};
         }
-
     private:
         static auto unit_name() -> std::string {
             if constexpr (std::is_same_v<Period, std::nano>) {
@@ -1600,70 +1603,15 @@ namespace stdpp::config {
     }
 
     template<typename T>
-    auto operator==(const FieldValue<T>& lhs, const FieldValue<T>& rhs) requires requires(const T& a, const T& b) { a == b; } {
+    auto operator<=>(const FieldValue<T>& lhs, const T& rhs) requires requires(const T& a, const T& b) { a <=> b; } {
         auto _ = lhs.read_lock();
+        return lhs.value() <=> rhs;
+    }
+
+    template<typename T>
+    auto operator<=>(const T& lhs, const FieldValue<T>& rhs) requires requires(const T& a, const T& b) { a <=> b; } {
         auto _ = rhs.read_lock();
-        return lhs.value() == rhs.value();
-    }
-
-    template<typename T>
-    auto operator<(const FieldValue<T>& lhs, const T& rhs) -> bool {
-        auto _ = lhs.read_lock();
-        return lhs.value() < rhs;
-    }
-
-    template<typename T>
-    auto operator>(const FieldValue<T>& lhs, const T& rhs) -> bool {
-        auto _ = lhs.read_lock();
-        return rhs < lhs.value();
-    }
-
-    template<typename T>
-    auto operator<=(const FieldValue<T>& lhs, const T& rhs) -> bool {
-        auto _ = lhs.read_lock();
-        return !(lhs > rhs);
-    }
-
-    template<typename T>
-    auto operator>=(const FieldValue<T>& lhs, const T& rhs) -> bool {
-        auto _ = lhs.read_lock();
-        return !(lhs < rhs);
-    }
-
-    template<typename T>
-    auto operator==(const FieldValue<T>& lhs, const T& rhs) -> bool {
-        auto _ = lhs.read_lock();
-        return lhs.value() == rhs;
-    }
-
-    template<typename T>
-    auto operator<(const T& lhs, const FieldValue<T>& rhs) -> bool {
-        auto _ = rhs.read_lock();
-        return lhs < rhs.value();
-    }
-
-    template<typename T>
-    auto operator>(const T& lhs, const FieldValue<T>& rhs) -> bool {
-        auto _ = rhs.read_lock();
-        return rhs.value() < lhs;
-    }
-
-    template<typename T>
-    auto operator<=(const T& lhs, const FieldValue<T>& rhs) -> bool {
-        auto _ = rhs.read_lock();
-        return !(lhs > rhs);
-    }
-
-    template<typename T>
-    auto operator>=(const T& lhs, const FieldValue<T>& rhs) -> bool {
-        auto _ = rhs.read_lock();
-        return !(lhs < rhs);
-    }
-
-    template<typename T>
-    auto operator==(const T& lhs, const FieldValue<T>& rhs) -> bool {
-        auto _ = rhs.read_lock();
-        return lhs == rhs.value();
+        return lhs <=> rhs.value();
     }
 
     template<typename T>
@@ -1718,28 +1666,28 @@ namespace stdpp::config {
         return lhs.value() / rhs;
     }
 
-    template<typename T>
-    auto operator+(const T& lhs, const FieldValue<T>& rhs) -> T {
+    template<typename L, typename R>
+    auto operator+(const L& lhs, const FieldValue<R>& rhs) -> R {
         auto _ = rhs.read_lock();
-        return lhs + rhs.value();
+        return static_cast<R>(lhs) / rhs.value();
     }
 
-    template<typename T>
-    auto operator-(const T& lhs, const FieldValue<T>& rhs) -> T {
+    template<typename L, typename R>
+    auto operator-(const L& lhs, const FieldValue<R>& rhs) -> R {
         auto _ = rhs.read_lock();
-        return lhs - rhs.value();
+        return static_cast<R>(lhs) / rhs.value();
     }
 
-    template<typename T>
-    auto operator*(const T& lhs, const FieldValue<T>& rhs) -> T {
+    template<typename L, typename R>
+    auto operator*(const L& lhs, const FieldValue<R>& rhs) -> R {
         auto _ = rhs.read_lock();
-        return lhs * rhs.value();
+        return static_cast<R>(lhs) / rhs.value();
     }
 
-    template<typename T>
-    auto operator/(const T& lhs, const FieldValue<T>& rhs) -> T {
+    template<typename L, typename R>
+    auto operator/(const L& lhs, const FieldValue<R>& rhs) -> R {
         auto _ = rhs.read_lock();
-        return lhs / rhs.value();
+        return static_cast<R>(lhs) / rhs.value();
     }
 
     template<typename T>
@@ -2026,4 +1974,4 @@ namespace stdpp::config {
         lhs.chang();
         return lhs;
     }
-}
+} // namespace stdpp::config
