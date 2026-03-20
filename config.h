@@ -4,7 +4,7 @@
 #pragma once
 
 // https://github.com/1992724048/stdpp-config
-// 1.2.3
+// 1.2.4
 
 #include <array>
 #include <atomic>
@@ -697,7 +697,7 @@ namespace stdpp::config {
          * @param func 回调函数
          * @return 事件句柄
          */
-        auto add_event(event::Event<void(const FEBP&, Event)>::Func func) -> OPT<event::FastEvent<void, const FEBP&, const Event>::Handle> {
+        auto add_event(event::Event<void(const FEBP&, Event)>::Func func) -> OPT<event::Event<void(const FEBP&, Event)>::Handle> {
             return Config::add_event(value_, func);
         }
 
