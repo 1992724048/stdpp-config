@@ -1,10 +1,10 @@
 // 遂沫 config.h
-// 2026-03-18 22:31:26
+// 2026-03-21 00:53:44
 
 #pragma once
 
 // https://github.com/1992724048/stdpp-config
-// 1.2.2
+// 1.2.3
 
 #include <array>
 #include <atomic>
@@ -22,11 +22,11 @@
 #include <string>
 #include <string_view>
 #include <type_traits>
+#include <typeindex>
 #include <typeinfo>
 #include <unordered_map>
 #include <variant>
 #include <vector>
-#include <typeindex>
 
 // ToruNiina/toml11 4.4.0
 #include "toml11/toml.hpp"
@@ -134,7 +134,7 @@ namespace stdpp::config {
 
         std::vector<STR> path_parts;
 
-        event::FastEvent<void, const PTR<FieldEntryBase>&, const Event> events;
+        event::Event<void(const PTR<FieldEntryBase>&, Event)> events;
     };
 
     /**
@@ -306,7 +306,7 @@ namespace stdpp::config {
          * @param func 回调函数
          * @return 成功时返回事件句柄，否则返回 std::nullopt
          */
-        static auto add_event(const STR& name, const event::FastEvent<void, const FEBP&, const Event>::Func func) -> OPT<event::FastEvent<void, const FEBP&, const Event>::Handle> {
+        static auto add_event(const STR& name, const event::Event<void(const FEBP&, Event)>::Func& func) -> OPT<event::Event<void(const FEBP&, Event)>::Handle> {
             const auto entry = find_entry(name);
             if (!entry) {
                 return std::nullopt;
@@ -319,7 +319,7 @@ namespace stdpp::config {
         * @param name 字段名
         * @param handle 事件句柄
         */
-        static auto remove_event(const STR& name, const event::FastEvent<void, const FEBP&, const Event>::Handle handle) -> void {
+        static auto remove_event(const STR& name, const event::Event<void(const FEBP&, Event)>::Handle& handle) -> void {
             const auto entry = find_entry(name);
             if (!entry) {
                 return;
@@ -333,7 +333,7 @@ namespace stdpp::config {
          * @param func 回调函数
          * @return 事件句柄（可能为空）
          */
-        static auto add_event(const FEBP& entry, const event::FastEvent<void, const FEBP&, const Event>::Func func) -> OPT<event::FastEvent<void, const FEBP&, const Event>::Handle> {
+        static auto add_event(const FEBP& entry, const event::Event<void(const FEBP&, Event)>::Func& func) -> OPT<event::Event<void(const FEBP&, Event)>::Handle> {
             return entry->events += func;
         }
 
@@ -342,7 +342,7 @@ namespace stdpp::config {
         * @param entry 字段实体
         * @param handle 事件句柄
         */
-        static auto remove_event(const FEBP& entry, const event::FastEvent<void, const FEBP&, const Event>::Handle handle) -> void {
+        static auto remove_event(const FEBP& entry, const event::Event<void(const FEBP&, Event)>::Handle& handle) -> void {
             return entry->events -= handle;
         }
 
@@ -697,7 +697,7 @@ namespace stdpp::config {
          * @param func 回调函数
          * @return 事件句柄
          */
-        auto add_event(event::FastEvent<void, const FEBP&, const Event>::Func func) -> OPT<event::FastEvent<void, const FEBP&, const Event>::Handle> {
+        auto add_event(event::Event<void(const FEBP&, Event)>::Func func) -> OPT<event::FastEvent<void, const FEBP&, const Event>::Handle> {
             return Config::add_event(value_, func);
         }
 
@@ -705,7 +705,7 @@ namespace stdpp::config {
          * @brief 移除字段事件监听
          * @param handle 事件句柄
          */
-        auto remove_event(const event::FastEvent<void, const FEBP&, const Event>::Handle handle) -> void {
+        auto remove_event(const event::Event<void(const FEBP&, Event)>::Handle& handle) -> void {
             return Config::remove_event(value_, handle);
         }
     protected:
