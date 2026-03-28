@@ -1,10 +1,9 @@
-// 遂沫 config.h
-// 2026-03-21 00:53:44
+// 2026-03-28 15:17:25
 
 #pragma once
 
 // https://github.com/1992724048/stdpp-config
-// 1.2.4
+// 1.3.0
 
 #include <array>
 #include <atomic>
@@ -120,6 +119,7 @@ namespace stdpp::config {
         virtual auto decode(const toml::value& value) -> void {}
     protected:
         friend class Config;
+        template<typename T>
         friend class FieldValueMutex;
 
         STR name;
@@ -156,6 +156,8 @@ namespace stdpp::config {
         friend class Field<T>;
         friend class FieldValue<T>;
         friend class Config;
+        template<typename Type>
+        friend class FieldValueMutex;
 
         T value;
 
@@ -467,29 +469,76 @@ namespace stdpp::config {
     * 用于安全访问 FieldValue 内部的 value，
     * 在作用域结束时自动释放锁。
     */
+    template<typename T>
     class FieldValueMutex {
     public:
-        FieldValueMutex(const FieldValueMutex&) = delete;
-        auto operator=(const FieldValueMutex&) -> FieldValueMutex& = delete;
-
-        FieldValueMutex(FieldValueMutex&&) = default;
-        auto operator=(FieldValueMutex&&) -> FieldValueMutex& = default;
-
-        /**
-         * @brief 构造并获取字段值锁
-         * @param entry 字段实体
-         * @param mode 锁模式（读 / 写）
-         */
-        FieldValueMutex(FEBP entry, const LockMode mode) : entry_(std::move(entry)),
-                                                           mode_(mode) {
+        FieldValueMutex(FEP<T> entry, const LockMode mode) : entry_(std::move(entry)),
+                                                             mode_(mode) {
             if (mode_ == LockMode::Write) {
                 write_lock_.emplace(entry_->value_mutex);
             } else {
                 read_lock_.emplace(entry_->value_mutex);
             }
         }
+
+        auto value() -> T& {
+            return entry_->value;
+        }
+
+        auto value() const -> const T& {
+            return entry_->value;
+        }
+
+        auto operator*() -> T& {
+            return value();
+        }
+
+        auto operator*() const -> const T& {
+            return value();
+        }
+
+        auto operator->() -> T* {
+            return &value();
+        }
+
+        auto operator->() const -> const T* {
+            return &value();
+        }
+
+        auto operator=(const T& rhs) -> FieldValueMutex& {
+            static_assert(!std::is_const_v<T>);
+            value() = rhs;
+            mark_change();
+            return *this;
+        }
+
+        auto operator++() -> FieldValueMutex& {
+            ++value();
+            mark_change();
+            return *this;
+        }
+
+        auto operator--() -> FieldValueMutex& {
+            --value();
+            mark_change();
+            return *this;
+        }
+
+        explicit operator bool() {
+            return value();
+        }
     private:
-        FEBP entry_;
+        auto mark_change() -> void {
+            if (mode_ == LockMode::Write) {
+                entry_->is_chang = true;
+                Config::mark_dirty();
+
+                std::shared_lock _(entry_->event_mutex);
+                entry_->events(entry_, Event::VALUE_CHANG);
+            }
+        }
+
+        FEP<T> entry_;
         LockMode mode_;
 
         std::optional<std::unique_lock<std::shared_mutex>> write_lock_;
@@ -642,16 +691,16 @@ namespace stdpp::config {
         /**
          * @brief 获取字段值的读锁
          */
-        [[nodiscard]] auto read_lock() const -> FieldValueMutex {
-            return FieldValueMutex(value_, LockMode::Read);
+        [[nodiscard]] auto write_lock() -> FieldValueMutex<T> {
+            return FieldValueMutex<T>(value_, LockMode::Write);
         }
 
         /**
          * @brief 获取字段值的写锁
          * @note 写锁析构后不会自动触发 chang()
          */
-        [[nodiscard]] auto write_lock() -> FieldValueMutex {
-            return FieldValueMutex(value_, LockMode::Write);
+        [[nodiscard]] auto read_lock() const -> FieldValueMutex<T> {
+            return FieldValueMutex<T>(value_, LockMode::Read);
         }
 
         /**
@@ -710,6 +759,7 @@ namespace stdpp::config {
         }
     protected:
         FEP<T> value_;
+        friend FieldValueMutex<T>;
     };
 
     template<typename T> concept HasValueType = requires { typename T::value_type; };
@@ -733,6 +783,8 @@ namespace stdpp::config {
         using FieldValue<T>::operator*;
         using FieldValue<T>::operator();
 
+        Field() = default;
+
         /**
          * @brief 声明一个字段（无初始值）
          * @param field_name 字段完整路径名
@@ -755,6 +807,23 @@ namespace stdpp::config {
 
         template<typename U = T> requires InitListConstructible<U>
         explicit Field(const STR& field_name, std::initializer_list<typename U::value_type> il) {
+            this->value_ = Config::find_or_create<T>(field_name, typeid(T).name(), T(il));
+            init(field_name);
+        }
+
+        auto create(const STR& field_name) -> void {
+            this->value_ = Config::find_or_create<T>(field_name, typeid(T).name());
+            init(field_name);
+        }
+
+        template<typename... Args> requires std::constructible_from<T, Args...>
+        auto create(const STR& field_name, Args&&... args) -> void {
+            this->value_ = Config::find_or_create<T>(field_name, typeid(T).name(), std::forward<Args>(args)...);
+            init(field_name);
+        }
+
+        template<typename U = T> requires InitListConstructible<U>
+        auto create(const STR& field_name, std::initializer_list<typename U::value_type> il) -> void {
             this->value_ = Config::find_or_create<T>(field_name, typeid(T).name(), T(il));
             init(field_name);
         }
