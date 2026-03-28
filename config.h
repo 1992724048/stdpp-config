@@ -1,9 +1,9 @@
-// 2026-03-28 15:17:25
+// 2026-03-29 04:58:49
 
 #pragma once
 
 // https://github.com/1992724048/stdpp-config
-// 1.3.1
+// 1.3.2
 
 #include <array>
 #include <atomic>
@@ -558,6 +558,14 @@ namespace stdpp::config {
     public:
         using Type = T;
 
+        constexpr operator T&() noexcept {
+            return value();
+        }
+
+        constexpr operator const T&() const noexcept {
+            return value();
+        }
+
         /**
          * @brief 获取字段值的只读引用
          */
@@ -782,6 +790,14 @@ namespace stdpp::config {
         using FieldValue<T>::operator->;
         using FieldValue<T>::operator*;
         using FieldValue<T>::operator();
+
+        constexpr operator T&() noexcept {
+            return this->value_->value;
+        }
+
+        constexpr operator const T&() const noexcept {
+            return this->value_->value;
+        }
 
         Field() = default;
 
