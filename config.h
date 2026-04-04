@@ -3,7 +3,7 @@
 #pragma once
 
 // https://github.com/1992724048/stdpp-config
-// 1.3.3
+// 1.3.4
 
 #include <array>
 #include <atomic>
@@ -778,7 +778,6 @@ namespace stdpp::config {
         using FieldValue<T>::operator--;
         using FieldValue<T>::operator->;
         using FieldValue<T>::operator*;
-        using FieldValue<T>::operator();
 
         constexpr operator T&() noexcept {
             return this->value_->value;
