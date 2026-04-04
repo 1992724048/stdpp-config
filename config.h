@@ -3,7 +3,7 @@
 #pragma once
 
 // https://github.com/1992724048/stdpp-config
-// 1.3.4
+// 1.3.5
 
 #include <array>
 #include <atomic>
@@ -1742,19 +1742,19 @@ namespace stdpp::config {
     template<typename L, typename R>
     auto operator+(const L& lhs, const FieldValue<R>& rhs) -> R {
         auto _ = rhs.read_lock();
-        return static_cast<R>(lhs) / rhs.value();
+        return static_cast<R>(lhs) + rhs.value();
     }
 
     template<typename L, typename R>
     auto operator-(const L& lhs, const FieldValue<R>& rhs) -> R {
         auto _ = rhs.read_lock();
-        return static_cast<R>(lhs) / rhs.value();
+        return static_cast<R>(lhs) - rhs.value();
     }
 
     template<typename L, typename R>
     auto operator*(const L& lhs, const FieldValue<R>& rhs) -> R {
         auto _ = rhs.read_lock();
-        return static_cast<R>(lhs) / rhs.value();
+        return static_cast<R>(lhs) * rhs.value();
     }
 
     template<typename L, typename R>
