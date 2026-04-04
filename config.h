@@ -3,7 +3,7 @@
 #pragma once
 
 // https://github.com/1992724048/stdpp-config
-// 1.3.2
+// 1.3.3
 
 #include <array>
 #include <atomic>
@@ -651,17 +651,6 @@ namespace stdpp::config {
             --value();
             chang();
             return *this;
-        }
-
-        template<typename... Args>
-        decltype(auto) operator()(Args&&... args) {
-            std::unique_lock _(value_->value_mutex);
-            chang();
-            return value()(std::forward<Args>(args)...);
-        }
-
-        explicit operator bool() {
-            return value_->value;
         }
 
         /**
