@@ -45,7 +45,7 @@ namespace stdpp::config {
     using PTR = std::shared_ptr<T>;
     using STR = std::string;
 
-    enum class Event { VALUE_CHANG, VALUE_LOAD, };
+    enum class Event { VALUE_CHANGE, VALUE_LOAD, };
 
     enum class LockMode { Read, Write };
 
@@ -538,7 +538,7 @@ namespace stdpp::config {
                 Config::instance().mark_dirty();
 
                 std::shared_lock _(entry_->event_mutex);
-                entry_->events(entry_, Event::VALUE_CHANG);
+                entry_->events(entry_, Event::VALUE_CHANGE);
             }
         }
 
@@ -712,11 +712,11 @@ namespace stdpp::config {
             value_->is_change = true;
             Config::instance().mark_dirty();
             if (has_mutex) {
-                value_->events(value_, Event::VALUE_CHANG);
+                value_->events(value_, Event::VALUE_CHANGE);
                 return;
             }
             std::shared_lock _(value_->event_mutex);
-            value_->events(value_, Event::VALUE_CHANG);
+            value_->events(value_, Event::VALUE_CHANGE);
         }
 
         /**
