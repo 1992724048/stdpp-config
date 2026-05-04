@@ -3,7 +3,7 @@
 #pragma once
 
 // https://github.com/1992724048/stdpp-config
-// 1.3.5
+// 1.3.6
 
 #include <array>
 #include <atomic>
@@ -130,7 +130,7 @@ namespace stdpp::config {
         std::shared_mutex value_mutex;
         std::shared_mutex event_mutex;
 
-        std::atomic_bool is_chang{false};
+        std::atomic_bool is_change{false};
 
         std::vector<STR> path_parts;
 
@@ -212,7 +212,7 @@ namespace stdpp::config {
          * @exception std::runtime_error 若已存在字段但类型与 T 不一致
          */
         template<typename T, typename... Args>
-        static auto find_or_create(const STR& name, const STR& type, Args&&... args) -> FEP<T> {
+        auto find_or_create(const STR& name, const STR& type, Args&&... args) -> FEP<T> {
             if (const auto opt = find_entry(name)) {
                 const auto& ptr = opt.value();
                 if (ptr->type != typeid(T)) {
@@ -238,7 +238,7 @@ namespace stdpp::config {
          * @param config_path 配置文件路径
          * @return 是否加载成功
          */
-        static auto load(const std::filesystem::path& config_path) -> bool {
+        auto load(const std::filesystem::path& config_path) -> bool {
             path = config_path;
 
             if (!load_config_from_file()) {
@@ -257,7 +257,7 @@ namespace stdpp::config {
          * @brief 重新加载上一次成功 load 的配置文件
          * @return 是否加载成功
          */
-        static auto refresh() -> bool {
+        auto refresh() -> bool {
             return load(path);
         }
 
@@ -267,7 +267,7 @@ namespace stdpp::config {
          * - 写入成功后清除脏标记
          * @return 是否保存成功
          */
-        static auto save() -> bool {
+        auto save() -> bool {
             if (!is_dirty.exchange(false)) {
                 return true;
             }
@@ -298,7 +298,7 @@ namespace stdpp::config {
         * @brief 标记当前配置为脏状态
         * 通常在字段值被修改时由内部自动调用。
         */
-        static auto mark_dirty() -> void {
+        auto mark_dirty() -> void {
             is_dirty = true;
         }
 
@@ -308,7 +308,7 @@ namespace stdpp::config {
          * @param func 回调函数
          * @return 成功时返回事件句柄，否则返回 std::nullopt
          */
-        static auto add_event(const STR& name, const event::Event<void(const FEBP&, Event)>::Func& func) -> OPT<event::Event<void(const FEBP&, Event)>::Handle> {
+        auto add_event(const STR& name, const event::Event<void(const FEBP&, Event)>::Func& func) -> OPT<event::Event<void(const FEBP&, Event)>::Handle> {
             const auto entry = find_entry(name);
             if (!entry) {
                 return std::nullopt;
@@ -321,7 +321,7 @@ namespace stdpp::config {
         * @param name 字段名
         * @param handle 事件句柄
         */
-        static auto remove_event(const STR& name, const event::Event<void(const FEBP&, Event)>::Handle& handle) -> void {
+        auto remove_event(const STR& name, const event::Event<void(const FEBP&, Event)>::Handle& handle) -> void {
             const auto entry = find_entry(name);
             if (!entry) {
                 return;
@@ -353,7 +353,7 @@ namespace stdpp::config {
          * @param name 字段名
          * @return 若存在返回字段指针，否则返回 std::nullopt
          */
-        static auto find_entry(const STR& name) -> OPT<FEBP> {
+        auto find_entry(const STR& name) -> OPT<FEBP> {
             std::shared_lock _(field_mutex);
             if (const auto it = field_entrys.find(name); it != field_entrys.end()) {
                 return it->second;
@@ -361,18 +361,22 @@ namespace stdpp::config {
             return std::nullopt;
         }
 
-        static auto config_path() -> std::filesystem::path {
+        auto config_path() -> std::filesystem::path {
             return path;
         }
-    private:
-        inline static toml::value loaded_config = toml::table{};
-        inline static bool has_loaded_config = false;
-        inline static std::shared_mutex field_mutex;
-        inline static std::shared_mutex config_mutex;
-        inline static std::atomic_bool is_dirty{false};
 
-        inline static std::filesystem::path path;
-        inline static MAP<STR, FEBP> field_entrys;
+        static auto instance() -> Config& {
+            static Config config;
+            return config;
+        }
+    private:
+        toml::value loaded_config = toml::table{};
+        bool has_loaded_config = false;
+        std::shared_mutex field_mutex;
+        std::shared_mutex config_mutex;
+        std::atomic_bool is_dirty{false};
+        std::filesystem::path path;
+        MAP<STR, FEBP> field_entrys;
 
         static auto split_path(STR name) -> std::vector<STR> {
             using namespace std::literals::string_view_literals;
@@ -385,7 +389,7 @@ namespace stdpp::config {
             return parts;
         }
 
-        static auto load_config_from_file() -> bool {
+        auto load_config_from_file() -> bool {
             if (!exists(path)) {
                 loaded_config = toml::table{};
                 has_loaded_config = false;
@@ -402,7 +406,7 @@ namespace stdpp::config {
             }
         }
 
-        static auto save_config_to_file() -> bool {
+        auto save_config_to_file() const -> bool {
             std::ofstream ofs(path);
             if (!ofs) {
                 return false;
@@ -411,7 +415,7 @@ namespace stdpp::config {
             return true;
         }
 
-        static auto find_config_value(const FEBP& entry) -> void {
+        auto find_config_value(const FEBP& entry) const -> void {
             const auto& parts = entry->path_parts;
             const toml::value* node = &loaded_config;
 
@@ -431,14 +435,14 @@ namespace stdpp::config {
 
             if (found) {
                 entry->decode(*node);
-                entry->is_chang = false;
+                entry->is_change = false;
                 std::shared_lock _(entry->event_mutex);
                 entry->events(entry, Event::VALUE_LOAD);
             }
         }
 
-        static auto value_to_config(const FEBP& entry) -> void {
-            if (!entry->is_chang.exchange(false)) {
+        auto value_to_config(const FEBP& entry) -> void {
+            if (!entry->is_change.exchange(false)) {
                 return;
             }
 
@@ -530,8 +534,8 @@ namespace stdpp::config {
     private:
         auto mark_change() -> void {
             if (mode_ == LockMode::Write) {
-                entry_->is_chang = true;
-                Config::mark_dirty();
+                entry_->is_change = true;
+                Config::instance().mark_dirty();
 
                 std::shared_lock _(entry_->event_mutex);
                 entry_->events(entry_, Event::VALUE_CHANG);
@@ -606,7 +610,7 @@ namespace stdpp::config {
         auto operator=(const T& rhs) -> FieldValue& {
             std::unique_lock _(value_->value_mutex);
             value() = rhs;
-            chang();
+            change();
             return *this;
         }
 
@@ -621,35 +625,35 @@ namespace stdpp::config {
             }
             std::unique_lock _(value_->value_mutex);
             value() = rhs.value();
-            chang();
+            change();
             return *this;
         }
 
         auto operator++() -> FieldValue& {
             std::unique_lock _(value_->value_mutex);
             ++value();
-            chang();
+            change();
             return *this;
         }
 
         auto operator--() -> FieldValue& {
             std::unique_lock _(value_->value_mutex);
             --value();
-            chang();
+            change();
             return *this;
         }
 
         auto operator++(int) -> FieldValue& {
             std::unique_lock _(value_->value_mutex);
             ++value();
-            chang();
+            change();
             return *this;
         }
 
         auto operator--(int) -> FieldValue& {
             std::unique_lock _(value_->value_mutex);
             --value();
-            chang();
+            change();
             return *this;
         }
 
@@ -704,9 +708,9 @@ namespace stdpp::config {
          * @brief 主动标记字段发生变更并触发事件
          * @param has_mutex 是否拥有锁
          */
-        auto chang(const bool has_mutex = false) -> void {
-            value_->is_chang = true;
-            Config::mark_dirty();
+        auto change(const bool has_mutex = false) -> void {
+            value_->is_change = true;
+            Config::instance().mark_dirty();
             if (has_mutex) {
                 value_->events(value_, Event::VALUE_CHANG);
                 return;
@@ -744,7 +748,7 @@ namespace stdpp::config {
          * @return 事件句柄
          */
         auto add_event(event::Event<void(const FEBP&, Event)>::Func func) -> OPT<event::Event<void(const FEBP&, Event)>::Handle> {
-            return Config::add_event(value_, func);
+            return Config::instance().add_event(value_, func);
         }
 
         /**
@@ -752,7 +756,7 @@ namespace stdpp::config {
          * @param handle 事件句柄
          */
         auto remove_event(const event::Event<void(const FEBP&, Event)>::Handle& handle) -> void {
-            return Config::remove_event(value_, handle);
+            return Config::instance().remove_event(value_, handle);
         }
     protected:
         FEP<T> value_;
@@ -794,7 +798,7 @@ namespace stdpp::config {
          * @param field_name 字段完整路径名
          */
         explicit Field(const STR& field_name) {
-            this->value_ = Config::find_or_create<T>(field_name, typeid(T).name());
+            this->value_ = Config::instance().find_or_create<T>(field_name, typeid(T).name());
             init(field_name);
         }
 
@@ -805,30 +809,30 @@ namespace stdpp::config {
         */
         template<typename... Args> requires std::constructible_from<T, Args...>
         explicit Field(const STR& field_name, Args&&... args) {
-            this->value_ = Config::find_or_create<T>(field_name, typeid(T).name(), std::forward<Args>(args)...);
+            this->value_ = Config::instance().find_or_create<T>(field_name, typeid(T).name(), std::forward<Args>(args)...);
             init(field_name);
         }
 
         template<typename U = T> requires InitListConstructible<U>
         explicit Field(const STR& field_name, std::initializer_list<typename U::value_type> il) {
-            this->value_ = Config::find_or_create<T>(field_name, typeid(T).name(), T(il));
+            this->value_ = Config::instance().find_or_create<T>(field_name, typeid(T).name(), T(il));
             init(field_name);
         }
 
         auto create(const STR& field_name) -> void {
-            this->value_ = Config::find_or_create<T>(field_name, typeid(T).name());
+            this->value_ = Config::instance().find_or_create<T>(field_name, typeid(T).name());
             init(field_name);
         }
 
         template<typename... Args> requires std::constructible_from<T, Args...>
         auto create(const STR& field_name, Args&&... args) -> void {
-            this->value_ = Config::find_or_create<T>(field_name, typeid(T).name(), std::forward<Args>(args)...);
+            this->value_ = Config::instance().find_or_create<T>(field_name, typeid(T).name(), std::forward<Args>(args)...);
             init(field_name);
         }
 
         template<typename U = T> requires InitListConstructible<U>
         auto create(const STR& field_name, std::initializer_list<typename U::value_type> il) -> void {
-            this->value_ = Config::find_or_create<T>(field_name, typeid(T).name(), T(il));
+            this->value_ = Config::instance().find_or_create<T>(field_name, typeid(T).name(), T(il));
             init(field_name);
         }
 
@@ -1767,7 +1771,7 @@ namespace stdpp::config {
     auto operator+=(FieldValue<T>& lhs, const T& rhs) -> FieldValue<T>& {
         auto _ = lhs.write_lock();
         lhs.value() += rhs;
-        lhs.chang();
+        lhs.change();
         return lhs;
     }
 
@@ -1782,7 +1786,7 @@ namespace stdpp::config {
     auto operator-=(FieldValue<T>& lhs, const T& rhs) -> FieldValue<T>& {
         auto _ = lhs.write_lock();
         lhs.value() -= rhs;
-        lhs.chang();
+        lhs.change();
         return lhs;
     }
 
@@ -1797,7 +1801,7 @@ namespace stdpp::config {
     auto operator*=(FieldValue<T>& lhs, const T& rhs) -> FieldValue<T>& {
         auto _ = lhs.write_lock();
         lhs.value() *= rhs;
-        lhs.chang();
+        lhs.change();
         return lhs;
     }
 
@@ -1812,7 +1816,7 @@ namespace stdpp::config {
     auto operator/=(FieldValue<T>& lhs, const T& rhs) -> FieldValue<T>& {
         auto _ = lhs.write_lock();
         lhs.value() /= rhs;
-        lhs.chang();
+        lhs.change();
         return lhs;
     }
 
@@ -1832,7 +1836,7 @@ namespace stdpp::config {
             auto _ = rhs.read_lock();
             lhs.value() += rhs.value();
         }
-        lhs.chang();
+        lhs.change();
         return lhs;
     }
 
@@ -1845,7 +1849,7 @@ namespace stdpp::config {
             auto _ = rhs.read_lock();
             lhs.value() -= rhs.value();
         }
-        lhs.chang();
+        lhs.change();
         return lhs;
     }
 
@@ -1858,7 +1862,7 @@ namespace stdpp::config {
             auto _ = rhs.read_lock();
             lhs.value() *= rhs.value();
         }
-        lhs.chang();
+        lhs.change();
         return lhs;
     }
 
@@ -1871,7 +1875,7 @@ namespace stdpp::config {
             auto _ = rhs.read_lock();
             lhs.value() /= rhs.value();
         }
-        lhs.chang();
+        lhs.change();
         return lhs;
     }
 
@@ -1941,7 +1945,7 @@ namespace stdpp::config {
     template<typename T>
     auto operator<<=(const FieldValue<T>& lhs, std::size_t shift) -> T {
         auto _ = lhs.write_lock();
-        lhs.chang();
+        lhs.change();
         return lhs.value() <<= shift;
     }
 
@@ -1954,7 +1958,7 @@ namespace stdpp::config {
     template<typename T>
     auto operator>>=(const FieldValue<T>& lhs, std::size_t shift) -> T {
         auto _ = lhs.write_lock();
-        lhs.chang();
+        lhs.change();
         return lhs.value() >>= shift;
     }
 
@@ -1968,7 +1972,7 @@ namespace stdpp::config {
     auto operator&=(FieldValue<T>& lhs, T rhs) -> FieldValue<T>& {
         auto _ = lhs.write_lock();
         lhs.value() &= rhs;
-        lhs.chang();
+        lhs.change();
         return lhs;
     }
 
@@ -1983,7 +1987,7 @@ namespace stdpp::config {
     auto operator|=(FieldValue<T>& lhs, T rhs) -> FieldValue<T>& {
         auto _ = lhs.write_lock();
         lhs.value() |= rhs;
-        lhs.chang();
+        lhs.change();
         return lhs;
     }
 
@@ -1998,7 +2002,7 @@ namespace stdpp::config {
     auto operator^=(FieldValue<T>& lhs, T rhs) -> FieldValue<T>& {
         auto _ = lhs.write_lock();
         lhs.value() ^= rhs;
-        lhs.chang();
+        lhs.change();
         return lhs;
     }
 
@@ -2018,7 +2022,7 @@ namespace stdpp::config {
             auto _ = rhs.read_lock();
             lhs.value() &= rhs.value();
         }
-        lhs.chang();
+        lhs.change();
         return lhs;
     }
 
@@ -2031,7 +2035,7 @@ namespace stdpp::config {
             auto _ = rhs.read_lock();
             lhs.value() |= rhs.value();
         }
-        lhs.chang();
+        lhs.change();
         return lhs;
     }
 
@@ -2044,7 +2048,7 @@ namespace stdpp::config {
             auto _ = rhs.read_lock();
             lhs.value() ^= rhs.value();
         }
-        lhs.chang();
+        lhs.change();
         return lhs;
     }
 } // namespace stdpp::config
