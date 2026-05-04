@@ -15,7 +15,7 @@ It treats configuration as **strongly typed variables**, supports rich STL and c
   * Automatically builds nested TOML tables
 * **Event-driven**
   * `VALUE_LOAD` when loaded from file
-  * `VALUE_CHANG` when modified at runtime
+  * `VALUE_CHANGE` when modified at runtime
 * **Thread-safe**
   * Separate locks for value / TOML / events
 * **Extensible serialization**
@@ -188,7 +188,7 @@ mode = "A"
 
 ```cpp
 auto h = port.add_event([](auto&, Event ev){
-    if(ev == Event::VALUE_CHANG) { /* changed */ }
+    if(ev == Event::VALUE_CHANGE) { /* changed */ }
 });
 ```
 
@@ -196,7 +196,7 @@ Event types:
 
 ```cpp
 enum class Event {
-    VALUE_CHANG,
+    VALUE_CHANGE,
     VALUE_LOAD
 };
 ```
