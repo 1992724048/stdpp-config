@@ -3,7 +3,7 @@
 #pragma once
 
 // https://github.com/1992724048/stdpp-config
-// 1.3.6
+// 1.4.0
 
 #include <array>
 #include <atomic>
