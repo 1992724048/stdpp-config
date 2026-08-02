@@ -35,7 +35,8 @@ It treats configuration as **strongly typed variables**, supports rich STL and c
   - `VALUE_LOAD` when loaded from file
   - `VALUE_CHANGE` when modified at runtime
 - **Thread-safe**
-  - Separate locks for value / TOML / events
+  - Lock hierarchy: global config lock → field registry lock → per-field value lock
+  - Concurrent `load()` / `save()` and reads/writes are race-free
 - **Extensible serialization**
   - Built-in support for many STL, chrono, and utility types
   - User-defined types via `Codec<T>`
@@ -45,7 +46,7 @@ It treats configuration as **strongly typed variables**, supports rich STL and c
 
 ## Dependencies
 
-- C++20
+- C++23
 - [ToruNiina/toml11](https://github.com/ToruNiina/toml11) ≥ 4.4.0
 - [Neargye/magic_enum](https://github.com/Neargye/magic_enum) ≥ 0.9.7
 - [stdpp-event](https://github.com/1992724048/stdpp-event)
@@ -115,6 +116,8 @@ Field<std::string> d("x", "default");
 
 > All operators are only enabled if the underlying `T` supports them.
 
+> Compound assignments (`+= -= *= /= <<= >>= |= &= ^=`) and `++/--` automatically trigger `VALUE_CHANGE` and mark the field dirty, so the next `Config::save()` persists the result.
+
 ## Value Access Semantics
 
 Reading a field always returns a **copy** of the underlying value, not a reference:
@@ -129,12 +132,19 @@ int val3 = x.copy();  // explicit copy
 For direct reference access, use `value_lock()` with RAII:
 
 ```cpp
-auto lock = x.value_lock();  // locks value_mutex
+auto lock = x.value_lock();  // locks value_mutex (exclusive)
 *lock = 100;                 // modify in-place via reference
 // ~FieldValueMutex() triggers VALUE_CHANGE automatically
 ```
 
-> The copy-by-default design ensures thread safety — reads never block the value for longer than necessary.
+For hot read paths, use `read_lock()` — a shared-lock, copy-free const view:
+
+```cpp
+auto guard = x.read_lock();  // shared lock, no copy, no event
+const int& v = *guard;       // const reference to the current value
+```
+
+> The copy-by-default design ensures thread safety — reads never block the value for longer than necessary. `read_lock()` avoids the copy entirely while multiple readers share the lock concurrently.
 
 ## Supported Containers and Types
 
@@ -270,18 +280,29 @@ Field<Point> pos("window::pos", {10,20});
 
 ## Thread Safety
 
-Each field internally has:
+Three-level lock hierarchy:
 
-- `value_mutex` – protects value
-- `toml_mutex` – protects encode/decode
-- `event_mutex` – protects callbacks
+- `config_mutex` – protects the config path and the parsed TOML document (file I/O, snapshots)
+- `field_mutex` – protects the field registry (concurrent field registration is safe)
+- `per-field value_mutex` – a `std::shared_mutex` protecting a single field's value
 
-Manual lock:
+Lock ordering is `config_mutex → field_mutex`; all other locks are acquired independently, so no deadlock cycle exists. Decoding runs outside the global lock on a deep-copied snapshot, and dirty-state tracking uses an atomic counter — concurrent `load()` / `save()` and save-during-field-registration cannot lose updates.
+
+Manual access:
 
 ```cpp
-auto lock = field.value_lock();
-// modify safely
+auto lock = field.value_lock();  // exclusive write guard (auto VALUE_CHANGE on destruction)
+auto guard = field.read_lock();  // shared read guard (no copy, no event)
 ```
+
+## Breaking Changes
+
+Introduced by the hardening refactor (all compile-time visible):
+
+- `Field<T>()` / `FieldValue<T>()` **default constructors are deleted** — always use named constructors: `Field<int>("x", 42)`
+- Aliases `STR / OPT / MAP / PTR / EXP` moved into `detail` — use `std::string`, `std::optional`, ... directly
+- Binary `&` on `FieldValue` was removed (`&=` remains); built-in address-of is preserved
+- Requires **C++23** (`std::expected`, chrono formatting) — enforced at compile time
 
 ## Design Notes
 
@@ -290,3 +311,10 @@ auto lock = field.value_lock();
 - Same-name different-type fields coexist independently via `#type` suffix
 - TOML value type mismatch during load silently skips the field (no exception)
 - File is created only on first successful `save()`
+- `save()` returns `false` on write failure (e.g. disk full) and keeps the dirty state for retry
+- `sys_time` keeps sub-second precision; `filesystem::path` round-trips as UTF-8 (non-ASCII paths safe)
+- Invalid `year_month_day` values are rejected on load (field keeps its default)
+
+## Testing
+
+94 assertions covering: 4-thread load/save stress, concurrent field registration, VALUE_CHANGE/VALUE_LOAD/event unsubscribe, round-trip of 26 codec types (including sub-second `sys_time`, UTF-8 paths, `unique_ptr`), error paths (type mismatch, invalid dates, save failure retry) and read/write lock concurrency — see `test.cpp`.

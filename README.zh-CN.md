@@ -35,7 +35,8 @@
   - `VALUE_LOAD` — 从文件加载时触发
   - `VALUE_CHANGE` — 运行时值变更时触发
 - **线程安全**
-  - 值 / TOML / 事件使用独立锁
+  - 三级锁层级：全局配置锁 → 字段注册表锁 → 单字段值锁
+  - 并发 `load()` / `save()` 与读写均无数据竞争
 - **可扩展序列化**
   - 内置支持众多 STL、chrono 和工具类型
   - 用户自定义类型通过 `Codec<T>`
@@ -45,7 +46,7 @@
 
 ## 依赖
 
-- C++20
+- C++23
 - [ToruNiina/toml11](https://github.com/ToruNiina/toml11) ≥ 4.4.0
 - [Neargye/magic_enum](https://github.com/Neargye/magic_enum) ≥ 0.9.7
 - [stdpp-event](https://github.com/1992724048/stdpp-event)
@@ -115,6 +116,8 @@ Field<std::string> d("x", "default");
 
 > 所有运算符仅在底层类型 `T` 支持时才会启用。
 
+> 复合赋值（`+= -= *= /= <<= >>= |= &= ^=`）与 `++/--` 会自动触发 `VALUE_CHANGE` 并标记脏状态，下一次 `Config::save()` 即持久化结果。
+
 ## 值访问语义
 
 读取字段时始终返回底层值的 **拷贝**，而非引用：
@@ -129,12 +132,19 @@ int val3 = x.copy();  // 显式拷贝
 如需直接引用访问，使用 `value_lock()` RAII 锁：
 
 ```cpp
-auto lock = x.value_lock();  // 锁定 value_mutex
+auto lock = x.value_lock();  // 锁定 value_mutex（独占）
 *lock = 100;                 // 通过引用原地修改
 // ~FieldValueMutex() 自动触发 VALUE_CHANGE 事件
 ```
 
-> 默认返回拷贝的设计保证了线程安全 — 读取操作不会长时间阻塞值的写访问。
+高频读路径推荐使用 `read_lock()` — 共享锁、免拷贝的 const 视图：
+
+```cpp
+auto guard = x.read_lock();  // 共享锁，不拷贝、不触发事件
+const int& v = *guard;       // 当前值的 const 引用
+```
+
+> 默认返回拷贝的设计保证了线程安全 — 读取操作不会长时间阻塞值的写访问。`read_lock()` 完全避免拷贝，且允许多个读者并发持有共享锁。
 
 ## 支持的容器与类型
 
@@ -269,18 +279,29 @@ Field<Point> pos("window::pos", {10,20});
 
 ## 线程安全
 
-每个字段内部持有三把锁：
+三级锁层级：
 
-- `value_mutex` — 保护值读写
-- `toml_mutex` — 保护编解码
-- `event_mutex` — 保护回调
+- `config_mutex` — 保护配置路径与解析后的 TOML 文档（文件 I/O、快照）
+- `field_mutex` — 保护字段注册表（并发注册字段安全）
+- `per-field value_mutex` — `std::shared_mutex`，保护单个字段的值
 
-手动加锁：
+锁顺序为 `config_mutex → field_mutex`；其余锁均独立获取，不存在死锁环。解码在全局锁外基于深拷贝快照进行，脏状态跟踪使用原子计数——并发 `load()` / `save()` 以及 save 期间新字段注册均不会丢失更新。
+
+手动访问：
 
 ```cpp
-auto lock = field.value_lock();
-// 安全修改
+auto lock = field.value_lock();  // 独占写守卫（析构时自动触发 VALUE_CHANGE）
+auto guard = field.read_lock();  // 共享读守卫（不拷贝、不触发事件）
 ```
+
+## 破坏性变更
+
+由本次加固重构引入（均为编译期可见）：
+
+- `Field<T>()` / `FieldValue<T>()` **默认构造已删除** — 必须使用命名构造器：`Field<int>("x", 42)`
+- 别名 `STR / OPT / MAP / PTR / EXP` 已移入 `detail` — 请直接使用 `std::string`、`std::optional` 等
+- `FieldValue` 的二进制 `&` 运算符已删除（`&=` 保留）；内建取地址语义不受影响
+- 要求 **C++23**（`std::expected`、chrono 格式化）— 编译期强制检查
 
 ## 设计说明
 
@@ -289,3 +310,10 @@ auto lock = field.value_lock();
 - 同名不同类型字段通过 `#type` 后缀独立共存
 - 加载时 TOML 类型不匹配时静默跳过（不抛异常）
 - 文件仅在首次成功 `save()` 时创建
+- `save()` 写入失败（如磁盘满）返回 `false` 并保留脏状态，可重试
+- `sys_time` 保留亚秒精度；`filesystem::path` 以 UTF-8 往返（非 ASCII 路径安全）
+- 非法的 `year_month_day` 值在加载时被拒绝（字段保留默认值）
+
+## 测试
+
+94 项断言覆盖：4 线程 load/save 压测、并发字段注册、VALUE_CHANGE/VALUE_LOAD/事件退订、26 种 Codec 类型往返（含亚秒 `sys_time`、UTF-8 路径、`unique_ptr`）、错误路径（类型不匹配、非法日期、save 失败重试）以及读写锁并发——见 `test.cpp`。
