@@ -1,54 +1,68 @@
-﻿// 2026-03-29 04:58:49
-
-#pragma once
-
-// https://github.com/1992724048/stdpp-config
-// 1.4.0
+﻿// 2026-08-02 17:19:24
 
 #include <array>
 #include <atomic>
 #include <bitset>
 #include <chrono>
 #include <complex>
-#include <deque>
+#include <concepts>
+#include <cstddef>
+#include <cstdint>
+#include <exception>
 #include <expected>
 #include <filesystem>
+#include <format>
 #include <fstream>
+#include <iterator>
 #include <list>
-#include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
+#include <queue>
 #include <ranges>
-#include <set>
 #include <shared_mutex>
+#include <sstream>
 #include <stack>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <type_traits>
 #include <typeindex>
 #include <typeinfo>
 #include <unordered_map>
-#include <unordered_set>
+#include <utility>
 #include <variant>
 #include <vector>
+
+// https://github.com/1992724048/stdpp-config
+// 1.5.0
 
 // ToruNiina/toml11 4.4.0
 #include "toml11/toml.hpp"
 // Neargye/magic_enum 0.9.7
 #include "magic_enum/magic_enum.hpp"
 // 1992724048/stdpp-event 1.0.3
-#include "stdpp/event.hpp"
+#include "event.hpp"
+
+#if defined(_MSVC_LANG) && _MSVC_LANG < 202302L
+#error                                                                         \
+    "stdpp/config.hpp requires C++23 (std::expected / chrono format); use /std:c++23 or /std:c++latest"
+#elif !defined(_MSVC_LANG) && defined(__cplusplus) && __cplusplus < 202302L
+#error "stdpp/config.hpp requires C++23 (std::expected / chrono format)"
+#endif
 
 namespace stdpp::config {
-    template<typename K, typename V>
-    using MAP = std::unordered_map<K, V>;
-    template<typename T, typename Err>
-    using EXP = std::expected<T, Err>;
-    template<typename T>
-    using OPT = std::optional<T>;
-    template<typename T>
-    using PTR = std::shared_ptr<T>;
-    using STR = std::string;
+    namespace detail {
+        template<typename K, typename V>
+        using MAP = std::unordered_map<K, V>;
+        template<typename T, typename Err>
+        using EXP = std::expected<T, Err>;
+        template<typename T>
+        using OPT = std::optional<T>;
+        template<typename T>
+        using PTR = std::shared_ptr<T>;
+        using STR = std::string;
+    } // namespace detail
 
     enum class Event : std::uint8_t { VALUE_CHANGE, VALUE_LOAD, };
 
@@ -78,7 +92,7 @@ namespace stdpp::config {
     class FieldValue;
 
     struct FieldEntryBase {
-        FieldEntryBase(STR name, STR type_name, const std::type_index& type) :
+        FieldEntryBase(std::string name, std::string type_name, const std::type_index& type) :
             name{std::move(name)},
             type_name{std::move(type_name)},
             type{type} {}
@@ -100,25 +114,23 @@ namespace stdpp::config {
         template<typename T>
         friend class FieldValueMutex;
 
-        STR name;
-        STR type_name;
+        std::string name;
+        std::string type_name;
         std::type_index type;
 
-        std::shared_mutex toml_mutex;
         std::shared_mutex value_mutex;
-        std::shared_mutex event_mutex;
 
         std::atomic_bool is_change{false};
 
-        std::vector<STR> path_parts;
+        std::vector<std::string> path_parts;
 
-        event::Event<void(const PTR<FieldEntryBase>&, Event)> events;
+        event::Event<void(const std::shared_ptr<FieldEntryBase>&, Event)> events;
     };
 
     template<Serializable T>
     struct FieldEntry final : FieldEntryBase {
         template<typename... Args> requires std::constructible_from<T, Args...>
-        FieldEntry(STR name, const STR& type, Args&&... args) :
+        FieldEntry(std::string name, const std::string& type, Args&&... args) :
             FieldEntryBase{std::move(name), typeid(T).name(), typeid(T)},
             value{std::forward<Args>(args)...} {}
 
@@ -132,18 +144,18 @@ namespace stdpp::config {
         friend class Config;
         template<typename Type>
         friend class FieldValueMutex;
+        template<typename Type>
+        friend class FieldValueReadGuard;
 
         T value;
     public:
         auto encode() -> toml::value override {
             std::shared_lock _(value_mutex);
-            std::unique_lock _(toml_mutex);
             return Codec<T>::encode(value);
         }
 
         auto decode(const toml::value& value_toml) -> void override {
             std::unique_lock _(value_mutex);
-            std::shared_lock _(toml_mutex);
             if constexpr (requires { Codec<T>::decode_into(value_toml, value); }) {
                 Codec<T>::decode_into(value_toml, value);
             } else {
@@ -172,28 +184,35 @@ namespace stdpp::config {
         friend class FieldValueMutex;
     public:
         auto load(const std::filesystem::path& config_path) -> bool {
+            std::vector<FEBP> entries;
+            toml::value config_snapshot;
             {
                 std::unique_lock _(config_mutex);
                 path = config_path;
                 if (!load_config_from_file()) {
                     return false;
                 }
+                config_snapshot = loaded_config;
+                std::shared_lock field_lock(field_mutex);
+                for (auto& entry : field_entries | std::views::values) {
+                    entries.push_back(entry);
+                }
             }
 
-            std::shared_lock _(field_mutex);
-            for (auto& entry : field_entrys | std::views::values) {
-                find_config_value(entry);
+            for (const auto& entry : entries) {
+                find_config_value(entry, config_snapshot);
             }
 
             return true;
         }
 
         auto refresh() -> bool {
-            return load(path);
+            return load(config_path());
         }
 
         auto save() -> bool {
-            if (!is_dirty.exchange(false)) {
+            auto base = dirty_count.load(std::memory_order_relaxed);
+            if (base == 0) {
                 return true;
             }
 
@@ -204,26 +223,32 @@ namespace stdpp::config {
             std::vector<FEBP> entries;
             {
                 std::shared_lock _(field_mutex);
-                for (auto& e : field_entrys | std::views::values) {
+                for (auto& e : field_entries | std::views::values) {
                     entries.push_back(e);
                 }
             }
 
+            bool saved = false;
             {
                 std::unique_lock _(config_mutex);
                 for (const auto& entry : entries) {
                     value_to_config(entry);
                 }
+                saved = save_config_to_file();
+                if (saved) {
+                    dirty_count.compare_exchange_strong(base, 0, std::memory_order_relaxed);
+                }
             }
 
-            return save_config_to_file();
+            return saved;
         }
 
         auto mark_dirty() -> void {
-            is_dirty = true;
+            dirty_count.fetch_add(1, std::memory_order_relaxed);
         }
 
         auto config_path() -> std::filesystem::path {
+            std::shared_lock _(config_mutex);
             return path;
         }
 
@@ -233,32 +258,42 @@ namespace stdpp::config {
         }
     private:
         template<typename T, typename... Args>
-        auto find_or_create(const STR& name, const STR& type, Args&&... args) -> FEP<T> {
+        auto find_or_create(const std::string& name, const std::string& type, Args&&... args) -> FEP<T> {
             const auto typed_name = name + "#" + type;
 
             if (const auto opt = find_entry(typed_name)) {
                 return std::static_pointer_cast<FE<T>>(opt.value());
             }
 
+            toml::value config_snapshot;
+            {
+                std::shared_lock _(config_mutex);
+                config_snapshot = loaded_config;
+            }
+
             auto entry = std::make_shared<FE<T>>(name, type, std::forward<Args>(args)...);
             entry->path_parts = split_path(name);
-            find_config_value(entry);
+            find_config_value(entry, config_snapshot);
+
             {
                 std::unique_lock _(field_mutex);
-                field_entrys[typed_name] = entry;
+                if (const auto it = field_entries.find(typed_name); it != field_entries.end()) {
+                    return std::static_pointer_cast<FE<T>>(it->second);
+                }
+                field_entries[typed_name] = entry;
             }
             return entry;
         }
 
-        auto find_entry(const STR& name) -> OPT<FEBP> {
+        auto find_entry(const std::string& name) -> std::optional<FEBP> {
             std::shared_lock _(field_mutex);
-            if (const auto it = field_entrys.find(name); it != field_entrys.end()) {
+            if (const auto it = field_entries.find(name); it != field_entries.end()) {
                 return it->second;
             }
             return std::nullopt;
         }
 
-        static auto add_event(const FEBP& entry, const event::Event<void(const FEBP&, Event)>::Func& func) -> OPT<event::Event<void(const FEBP&, Event)>::Handle> {
+        static auto add_event(const FEBP& entry, const event::Event<void(const FEBP&, Event)>::Func& func) -> std::optional<event::Event<void(const FEBP&, Event)>::Handle> {
             return entry->events += func;
         }
 
@@ -267,18 +302,20 @@ namespace stdpp::config {
         }
 
         toml::value loaded_config = toml::table{};
-        bool has_loaded_config = false;
         std::shared_mutex field_mutex;
         std::shared_mutex config_mutex;
-        std::atomic_bool is_dirty{false};
+        std::atomic<uint64_t> dirty_count{0};
         std::filesystem::path path;
-        MAP<STR, FEBP> field_entrys;
+        std::unordered_map<std::string, FEBP> field_entries;
 
-        static auto split_path(STR name) -> std::vector<STR> {
+        static auto split_path(std::string name) -> std::vector<std::string> {
             using namespace std::literals::string_view_literals;
             std::vector<std::string> parts;
 
             for (auto&& r : name | std::views::split("::"sv)) {
+                if (r.empty()) {
+                    continue;
+                }
                 parts.emplace_back(&*r.begin(), std::ranges::distance(r));
             }
 
@@ -288,16 +325,13 @@ namespace stdpp::config {
         auto load_config_from_file() -> bool {
             if (!exists(path)) {
                 loaded_config = toml::table{};
-                has_loaded_config = false;
                 return false;
             }
 
             try {
                 loaded_config = toml::parse(path.string());
-                has_loaded_config = true;
                 return true;
             } catch (...) {
-                has_loaded_config = false;
                 return false;
             }
         }
@@ -308,12 +342,13 @@ namespace stdpp::config {
                 return false;
             }
             ofs << format(loaded_config);
-            return true;
+            ofs.flush();
+            return !ofs.fail();
         }
 
-        auto find_config_value(const FEBP& entry) const -> void {
+        static auto find_config_value(const FEBP& entry, const toml::value& config) -> void {
             const auto& parts = entry->path_parts;
-            const toml::value* node = &loaded_config;
+            const toml::value* node = &config;
 
             bool found = true;
             for (const auto& p : parts) {
@@ -333,9 +368,12 @@ namespace stdpp::config {
                 try {
                     entry->decode(*node);
                     entry->is_change = false;
-                    std::shared_lock _(entry->event_mutex);
                     entry->events(entry, Event::VALUE_LOAD);
-                } catch (const toml::type_error&) {}
+                } catch (const toml::type_error&) {
+                    // 类型不匹配：保留旧值
+                } catch (const std::exception&) {
+                    // 容器/适配器/枚举等特化解码抛 runtime_error：保留旧值
+                }
             }
         }
 
@@ -378,7 +416,6 @@ namespace stdpp::config {
                 lock_.unlock();
                 entry_->is_change = true;
                 Config::instance().mark_dirty();
-                std::shared_lock _(entry_->event_mutex);
                 entry_->events(entry_, Event::VALUE_CHANGE);
             }
         }
@@ -397,6 +434,12 @@ namespace stdpp::config {
 
         auto operator=(const T& rhs) -> FieldValueMutex& {
             entry_->value = rhs;
+            dirty_ = true;
+            return *this;
+        }
+
+        auto operator=(T&& rhs) -> FieldValueMutex& {
+            entry_->value = std::move(rhs);
             dirty_ = true;
             return *this;
         }
@@ -437,7 +480,6 @@ namespace stdpp::config {
             if (dirty_) {
                 entry_->is_change = true;
                 Config::instance().mark_dirty();
-                std::shared_lock _(entry_->event_mutex);
                 entry_->events(entry_, Event::VALUE_CHANGE);
                 dirty_ = false;
             }
@@ -449,11 +491,39 @@ namespace stdpp::config {
     };
 
     template<typename T>
+    class FieldValueReadGuard {
+    public:
+        explicit FieldValueReadGuard(FEP<T> entry) :
+            entry_(std::move(entry)),
+            lock_(entry_->value_mutex) {}
+
+        FieldValueReadGuard(const FieldValueReadGuard&) = delete;
+        auto operator=(const FieldValueReadGuard&) -> FieldValueReadGuard& = delete;
+
+        FieldValueReadGuard(FieldValueReadGuard&& other) noexcept :
+            entry_(std::move(other.entry_)),
+            lock_(std::move(other.lock_)) {}
+
+        auto operator=(FieldValueReadGuard&&) -> FieldValueReadGuard& = delete;
+
+        auto operator*() const -> const T& {
+            return entry_->value;
+        }
+
+        auto operator->() const -> const T* {
+            return &entry_->value;
+        }
+    private:
+        FEP<T> entry_;
+        std::shared_lock<std::shared_mutex> lock_;
+    };
+
+    template<typename T>
     class FieldValue {
     public:
         using Type = T;
 
-        FieldValue() = default;
+        FieldValue() = delete;
 
         operator T() const {
             std::shared_lock _(value_->value_mutex);
@@ -473,6 +543,14 @@ namespace stdpp::config {
         auto operator=(const T& rhs) -> FieldValue& {
             std::unique_lock _(value_->value_mutex);
             value_->value = rhs;
+            _.unlock();
+            change();
+            return *this;
+        }
+
+        auto operator=(T&& rhs) -> FieldValue& {
+            std::unique_lock _(value_->value_mutex);
+            value_->value = std::move(rhs);
             _.unlock();
             change();
             return *this;
@@ -532,7 +610,7 @@ namespace stdpp::config {
             return value_;
         }
 
-        auto name() -> STR {
+        auto name() -> std::string {
             return value_->name;
         }
 
@@ -540,7 +618,7 @@ namespace stdpp::config {
             return value_->type;
         }
 
-        auto type_name() -> STR {
+        auto type_name() -> std::string {
             return value_->type_name;
         }
 
@@ -548,18 +626,17 @@ namespace stdpp::config {
             return FieldValueMutex<T>(value_);
         }
 
-        auto change(const bool has_mutex = false) -> void {
+        [[nodiscard]] auto read_lock() const -> FieldValueReadGuard<T> {
+            return FieldValueReadGuard<T>(value_);
+        }
+
+        auto change() -> void {
             value_->is_change = true;
             Config::instance().mark_dirty();
-            if (has_mutex) {
-                value_->events(value_, Event::VALUE_CHANGE);
-                return;
-            }
-            std::shared_lock _(value_->event_mutex);
             value_->events(value_, Event::VALUE_CHANGE);
         }
 
-        auto add_event(event::Event<void(const FEBP&, Event)>::Func func) -> OPT<event::Event<void(const FEBP&, Event)>::Handle> {
+        auto add_event(event::Event<void(const FEBP&, Event)>::Func func) -> std::optional<event::Event<void(const FEBP&, Event)>::Handle> {
             return Config::instance().add_event(value_, func);
         }
 
@@ -570,12 +647,15 @@ namespace stdpp::config {
         FieldValue(FieldValue&&) = default;
         auto operator=(FieldValue&&) -> FieldValue& = default;
     protected:
+        explicit FieldValue(FEP<T> value) :
+            value_(std::move(value)) {}
+
         FEP<T> value_;
         friend FieldValueMutex<T>;
     };
 
-    template<typename T> concept HasValueType = requires { typename T::value_type; };
-    template<typename T> concept InitListConstructible = HasValueType<T> && std::constructible_from<T, std::initializer_list<typename T::value_type>>;
+    template<typename T>concept HasValueType = requires { typename T::value_type; };
+    template<typename T>concept InitListConstructible = HasValueType<T> && std::constructible_from<T, std::initializer_list<typename T::value_type>>;
 
     template<typename T>
     class Field : public FieldValue<T> {
@@ -589,41 +669,38 @@ namespace stdpp::config {
         using FieldValue<T>::ptr;
         using FieldValue<T>::change;
     public:
-        Field() = default;
+        Field() = delete;
 
-        explicit Field(const STR& field_name) :
-            FieldValue<T>{} {
+        explicit Field(const std::string& field_name) :
+            FieldValue<T>(Config::instance().find_or_create<T>(field_name, typeid(T).name())) {
+            init(field_name);
+        }
+
+        template<typename... Args> requires std::constructible_from<T, Args...>
+        explicit Field(const std::string& field_name, Args&&... args) :
+            FieldValue<T>(Config::instance().find_or_create<T>(field_name, typeid(T).name(), std::forward<Args>(args)...)) {
+            init(field_name);
+        }
+
+        template<typename U = T> requires InitListConstructible<U>
+        explicit Field(const std::string& field_name, std::initializer_list<typename U::value_type> il) :
+            FieldValue<T>(Config::instance().find_or_create<T>(field_name, typeid(T).name(), T(il))) {
+            init(field_name);
+        }
+
+        auto create(const std::string& field_name) -> void {
             this->value_ = Config::instance().find_or_create<T>(field_name, typeid(T).name());
             init(field_name);
         }
 
         template<typename... Args> requires std::constructible_from<T, Args...>
-        explicit Field(const STR& field_name, Args&&... args) :
-            FieldValue<T>{} {
+        auto create(const std::string& field_name, Args&&... args) -> void {
             this->value_ = Config::instance().find_or_create<T>(field_name, typeid(T).name(), std::forward<Args>(args)...);
             init(field_name);
         }
 
         template<typename U = T> requires InitListConstructible<U>
-        explicit Field(const STR& field_name, std::initializer_list<typename U::value_type> il) :
-            FieldValue<T>{} {
-            this->value_ = Config::instance().find_or_create<T>(field_name, typeid(T).name(), T(il));
-            init(field_name);
-        }
-
-        auto create(const STR& field_name) -> void {
-            this->value_ = Config::instance().find_or_create<T>(field_name, typeid(T).name());
-            init(field_name);
-        }
-
-        template<typename... Args> requires std::constructible_from<T, Args...>
-        auto create(const STR& field_name, Args&&... args) -> void {
-            this->value_ = Config::instance().find_or_create<T>(field_name, typeid(T).name(), std::forward<Args>(args)...);
-            init(field_name);
-        }
-
-        template<typename U = T> requires InitListConstructible<U>
-        auto create(const STR& field_name, std::initializer_list<typename U::value_type> il) -> void {
+        auto create(const std::string& field_name, std::initializer_list<typename U::value_type> il) -> void {
             this->value_ = Config::instance().find_or_create<T>(field_name, typeid(T).name(), T(il));
             init(field_name);
         }
@@ -644,8 +721,8 @@ namespace stdpp::config {
             return v;
         }
     private:
-        static auto registry() -> MAP<STR, FEP<T>>& {
-            static MAP<STR, FEP<T>> fields;
+        static auto registry() -> std::unordered_map<std::string, FEP<T>>& {
+            static std::unordered_map<std::string, FEP<T>> fields;
             return fields;
         }
 
@@ -654,7 +731,7 @@ namespace stdpp::config {
             return mutex;
         }
 
-        auto init(const STR& field_name) -> void {
+        auto init(const std::string& field_name) -> void {
             auto& map = registry();
             auto& mtx = registry_mutex();
             std::unique_lock _(mtx);
@@ -665,24 +742,22 @@ namespace stdpp::config {
         }
     };
 
-    template<typename T> concept NotString = !std::is_same_v<std::decay_t<T>, std::string>;
+    template<typename T>concept NotString = !std::is_same_v<std::decay_t<T>, std::string>;
 
-    template<typename C, typename T> concept HasInsert = requires(C c, T v) {
-        c.insert(c.end(), v);
-    };
+    template<typename C, typename T>concept HasInsert = requires(C c, T v) { c.insert(c.end(), v); };
 
-    template<typename M> concept MapLike = requires {
+    template<typename M>concept MapLike = requires {
         typename M::key_type; typename M::mapped_type; typename M::value_type;
     };
 
-    template<typename Q> concept AdapterLike = requires(Q q) {
+    template<typename Q>concept AdapterLike = requires(Q q) {
         q.empty(); q.pop();
     };
 
     template<typename P>
     using ElementTypeT = P::element_type;
 
-    template<typename P> concept PointerLike = requires(P p) {
+    template<typename P>concept PointerLike = requires(P p) {
         typename ElementTypeT<P>; { p.get() } -> std::same_as<ElementTypeT<P>*>; static_cast<bool>(p);
     };
 
@@ -695,7 +770,7 @@ namespace stdpp::config {
      * @tparam C 容器模板
      * @tparam T 元素类型
      */
-    template<template<class...> class C, typename T, typename... Args> requires HasInsert<C<T, Args...>, T> && (!MapLike<C<T, Args...>>) && NotString<C<T, Args...>>
+    template<template <class...> class C, typename T, typename... Args> requires HasInsert<C<T, Args...>, T> && (!MapLike<C<T, Args...>>) && NotString<C<T, Args...>>
     struct Codec<C<T, Args...>> {
         static auto encode(const C<T, Args...>& c) -> toml::value {
             toml::array arr;
@@ -1133,8 +1208,7 @@ namespace stdpp::config {
     template<typename Duration>
     struct Codec<std::chrono::sys_time<Duration>> {
         static auto encode(const std::chrono::sys_time<Duration>& t) -> toml::value {
-            auto tp = std::chrono::time_point_cast<std::chrono::seconds>(t);
-            return std::format("{:%FT%TZ}", tp);
+            return std::format("{:%FT%TZ}", t);
         }
 
         static auto decode(const toml::value& v) -> std::chrono::sys_time<Duration> {
@@ -1174,7 +1248,11 @@ namespace stdpp::config {
             }
 
             const auto& t = v.as_table();
-            return std::chrono::year{toml::get<int>(t.at("year"))} / toml::get<unsigned>(t.at("month")) / toml::get<unsigned>(t.at("day"));
+            const auto ymd = std::chrono::year{toml::get<int>(t.at("year"))} / toml::get<unsigned>(t.at("month")) / toml::get<unsigned>(t.at("day"));
+            if (!ymd.ok()) {
+                throw std::runtime_error("ymd decode failed: invalid date");
+            }
+            return ymd;
         }
     };
 
@@ -1370,8 +1448,17 @@ namespace stdpp::config {
             }
 
             const auto& t = v.as_table();
+            if (!t.contains("has")) {
+                throw std::runtime_error("expected decode failed: missing 'has'");
+            }
             if (toml::get<bool>(t.at("has"))) {
+                if (!t.contains("value")) {
+                    throw std::runtime_error("expected decode failed: missing 'value'");
+                }
                 return Codec<T>::decode(t.at("value"));
+            }
+            if (!t.contains("error")) {
+                throw std::runtime_error("expected decode failed: missing 'error'");
             }
             return std::unexpected(Codec<E>::decode(t.at("error")));
         }
@@ -1432,11 +1519,13 @@ namespace stdpp::config {
     template<>
     struct Codec<std::filesystem::path> {
         static auto encode(const std::filesystem::path& p) -> toml::value {
-            return p.string();
+            const auto u8 = p.u8string();
+            return std::string(reinterpret_cast<const char*>(u8.data()), u8.size());
         }
 
         static auto decode(const toml::value& v) -> std::filesystem::path {
-            return std::filesystem::path(toml::get<std::string>(v));
+            const auto s = toml::get<std::string>(v);
+            return std::filesystem::path(std::u8string(reinterpret_cast<const char8_t*>(s.data()), s.size()));
         }
     };
 
@@ -1504,27 +1593,36 @@ namespace stdpp::config {
 
         template<typename Op, typename T>
         auto cmpassign_self(FieldValue<T>& a, const T& b, Op&& op) -> FieldValue<T>& {
-            auto lock = a.value_lock();
-            op(*lock, b);
+            {
+                auto lock = a.value_lock();
+                op(*lock, b);
+            }
+            a.change();
             return a;
         }
 
         template<typename Op, typename T>
         auto cmpassign_other(T& a, FieldValue<T>& b, Op&& op) -> T& {
-            auto lock = b.value_lock();
-            op(a, *lock);
+            {
+                auto lock = b.value_lock();
+                op(a, *lock);
+            }
+            b.change();
             return a;
         }
 
         template<typename Op, typename T>
         auto cmpassign_same(FieldValue<T>& a, const FieldValue<T>& b, Op&& op) -> FieldValue<T>& {
-            if (a.ptr() == b.ptr()) {
-                auto lock = a.value_lock();
-                op(*lock, *lock);
-            } else {
-                std::scoped_lock _(a.ptr()->value_mutex, b.ptr()->value_mutex);
-                op(a.ptr()->value, b.ptr()->value);
+            {
+                if (a.ptr() == b.ptr()) {
+                    auto lock = a.value_lock();
+                    op(*lock, *lock);
+                } else {
+                    std::scoped_lock _(a.ptr()->value_mutex, b.ptr()->value_mutex);
+                    op(a.ptr()->value, b.ptr()->value);
+                }
             }
+            a.change();
             return a;
         }
 
@@ -1535,33 +1633,37 @@ namespace stdpp::config {
         }
     } // namespace detail
 
-    #define FV_BINARY_OP(op, op_sym)                                                           \
-        template<typename T>                                                                   \
-        auto operator op(const FieldValue<T>& a, const FieldValue<T>& b) -> T {                \
-            return detail::binop(a, b, [](const T& x, const T& y) { return x op_sym y; });     \
-        }                                                                                      \
-        template<typename T>                                                                   \
-        auto operator op(const FieldValue<T>& a, const T& b) -> T {                            \
-            return detail::binop(a, b, [](const T& x, const T& y) { return x op_sym y; });     \
-        }                                                                                      \
-        template<typename T, typename U>                                                       \
-        auto operator op(const U& a, const FieldValue<T>& b) -> T {                            \
-            return detail::binop(a, b, [](const T& x, const T& y) { return x op_sym y; });     \
-        }
+    #define FV_BINARY_OP(op, op_sym)                                               \
+  template <typename T>                                                        \
+  auto operator op(const FieldValue<T> &a, const FieldValue<T> &b)->T {        \
+    return detail::binop(a, b,                                                 \
+                         [](const T &x, const T &y) { return x op_sym y; });   \
+  }                                                                            \
+  template <typename T>                                                        \
+  auto operator op(const FieldValue<T> &a, const T &b)->T {                    \
+    return detail::binop(a, b,                                                 \
+                         [](const T &x, const T &y) { return x op_sym y; });   \
+  }                                                                            \
+  template <typename T, typename U>                                            \
+  auto operator op(const U &a, const FieldValue<T> &b)->T {                    \
+    return detail::binop(a, b,                                                 \
+                         [](const T &x, const T &y) { return x op_sym y; });   \
+  }
 
-    #define FV_CMP_ASSIGN_OP(op, op_sym)                                                       \
-        template<typename T>                                                                   \
-        auto operator op(FieldValue<T>& a, const T& b) -> FieldValue<T>& {                     \
-            return detail::cmpassign_self(a, b, [](T& x, const T& y) { x op_sym y; });          \
-        }                                                                                      \
-        template<typename T>                                                                   \
-        auto operator op(T& a, FieldValue<T>& b) -> T& {                                       \
-            return detail::cmpassign_other(a, b, [](T& x, const T& y) { x op_sym y; });         \
-        }                                                                                      \
-        template<typename T>                                                                   \
-        auto operator op(FieldValue<T>& a, const FieldValue<T>& b) -> FieldValue<T>& {         \
-            return detail::cmpassign_same(a, b, [](T& x, const T& y) { x op_sym y; });          \
-        }
+    #define FV_CMP_ASSIGN_OP(op, op_sym)                                           \
+  template <typename T>                                                        \
+  auto operator op(FieldValue<T> &a, const T &b)->FieldValue<T> & {            \
+    return detail::cmpassign_self(a, b, [](T &x, const T &y) { x op_sym y; }); \
+  }                                                                            \
+  template <typename T> auto operator op(T &a, FieldValue<T> &b)->T & {        \
+    return detail::cmpassign_other(a, b,                                       \
+                                   [](T &x, const T &y) { x op_sym y; });      \
+  }                                                                            \
+  template <typename T>                                                        \
+  auto operator op(FieldValue<T> &a, const FieldValue<T> &b)                   \
+      ->FieldValue<T> & {                                                      \
+    return detail::cmpassign_same(a, b, [](T &x, const T &y) { x op_sym y; }); \
+  }
 
     FV_BINARY_OP(+, +)
     FV_BINARY_OP(-, -)
@@ -1573,7 +1675,6 @@ namespace stdpp::config {
     FV_CMP_ASSIGN_OP(*=, *=)
     FV_CMP_ASSIGN_OP(/=, /=)
 
-    FV_BINARY_OP(&, &)
     FV_BINARY_OP(|, |)
     FV_BINARY_OP(^, ^)
 
@@ -1590,15 +1691,25 @@ namespace stdpp::config {
     }
 
     template<typename T>
-    auto operator<<=(const FieldValue<T>& lhs, std::size_t shift) -> T {
-        auto lock = lhs.value_lock();
-        return *lock <<= shift;
+    auto operator<<=(FieldValue<T>& lhs, std::size_t shift) -> T {
+        T result;
+        {
+            auto lock = lhs.value_lock();
+            result = *lock <<= shift;
+        }
+        lhs.change();
+        return result;
     }
 
     template<typename T>
-    auto operator>>=(const FieldValue<T>& lhs, std::size_t shift) -> T {
-        auto lock = lhs.value_lock();
-        return *lock >>= shift;
+    auto operator>>=(FieldValue<T>& lhs, std::size_t shift) -> T {
+        T result;
+        {
+            auto lock = lhs.value_lock();
+            result = *lock >>= shift;
+        }
+        lhs.change();
+        return result;
     }
 
     template<typename T>
