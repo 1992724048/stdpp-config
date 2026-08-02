@@ -1,4 +1,6 @@
-﻿// 2026-08-02 17:19:24
+﻿// 2026-08-02 17:41:44
+
+#pragma once
 
 #include <array>
 #include <atomic>
